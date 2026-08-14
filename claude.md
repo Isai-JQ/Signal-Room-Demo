@@ -23,8 +23,9 @@ Multi-agent pipeline that turns social media comments into approved campaign bri
 Every model call goes through `lib/llm/provider.ts`:
 
 ```ts
-complete<T>({ task, system, prompt, schema }):
-  Promise<{ data: T; structured_mode; schema_honored }>
+complete<T>({ task, system, prompt, schema }): Promise<{
+  data: T; structured_mode; transport_attempts; repair_attempts; schema_honored
+}>
 embed(texts: string[]): Promise<number[][]>
 ```
 
@@ -71,13 +72,27 @@ Document them, don't hide them. They go in the README.
 
 ## Observability
 
-`agent_events` stores per run: `agent`, `task`, `provider`, `model`,
-`structured_mode` (`native` | `fallback`), `schema_honored` (bool),
-`input_hash`, `output`, `tokens`, `latency_ms`, `attempt`, `error`, `ts`.
+`agent_events` stores per run: `campaign_id` (nullable), `agent`, `task`,
+`provider`, `model`, `structured_mode` (`native` | `fallback`),
+`transport_attempts`, `repair_attempts`, `schema_honored` (bool), `input_hash`,
+`output`, `tokens`, `latency_ms`, `error`, `ts`.
 
-The last two are deliberately separate: `structured_mode` is what was asked for,
-`schema_honored` is what happened — whether the first attempt validated against
-Zod without needing the repair round-trip.
+`campaign_id` is what the trace view filters on; without it you are left
+searching by time range, which breaks as soon as two runs overlap. It is
+nullable because `pnpm eval` also writes events that belong to no campaign.
+
+The retry counters are kept apart because they measure different failures:
+
+- `transport_attempts` — extra calls caused by 429 and 5xx retries. A provider
+  capacity problem; says nothing about the model.
+- `repair_attempts` — extra calls caused by a Zod validation failure. 0 or 1,
+  since claude.md allows a single repair round-trip.
+- `schema_honored` — `repair_attempts === 0`. Deliberately independent of
+  `transport_attempts`: a rate-limited call that then validates first time still
+  counts as honored.
+
+And `structured_mode` is what was asked for, while `schema_honored` is what
+happened.
 
 `pnpm eval` reports the `schema_honored` rate per provider and model. That is
 the metric that tells you whether native structured output actually works on

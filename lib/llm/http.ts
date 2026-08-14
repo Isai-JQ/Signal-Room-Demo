@@ -57,8 +57,15 @@ export async function request<T>(url: string, init: RequestInit): Promise<T> {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Retries 429 and 5xx. Honours Retry-After when the provider sends one. */
-export async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+/**
+ * Retries 429 and 5xx. Honours Retry-After when the provider sends one.
+ * `onRetry` fires once per retry so callers can count transport attempts
+ * separately from schema repairs.
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  onRetry?: () => void,
+): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
@@ -66,6 +73,7 @@ export async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
       const retryable =
         err instanceof HttpError && (err.status === 429 || err.status >= 500);
       if (!retryable || attempt >= MAX_RETRIES) throw err;
+      onRetry?.();
       await sleep(err.retryAfterMs ?? retryBaseMs() * 2 ** attempt);
     }
   }

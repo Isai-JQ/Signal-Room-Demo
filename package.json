@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "node --import tsx --test lib/llm/provider.test.ts",
+    "test": "node --import tsx --test lib/llm/provider.test.ts lib/schemas.test.ts lib/seed.test.ts",
+    "seed": "node --import tsx lib/seed.ts",
+    "embed": "node --import tsx lib/embed.ts",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push"
   },

@@ -55,7 +55,11 @@ export type Completion<T> = {
   data: T;
   /** What we asked for. */
   structured_mode: StructuredMode;
-  /** What we got: the first attempt validated, no repair round-trip needed. */
+  /** Extra calls the transport cost us: 429 and 5xx retries. Says nothing about the model. */
+  transport_attempts: number;
+  /** Extra calls the model cost us: repair round-trips after a Zod failure. 0 or 1. */
+  repair_attempts: number;
+  /** What we got: the model satisfied the schema first time. Retries don't count. */
   schema_honored: boolean;
 };
 
@@ -87,23 +91,32 @@ export async function complete<T>({
   let attemptPrompt = prompt;
   let raw = "";
   let issues = "";
+  let transport_attempts = 0;
 
   // claude.md: one repair round-trip with the error injected, then give up.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let repair_attempts = 0; repair_attempts < 2; repair_attempts++) {
     raw = await withLimit(() =>
-      withRetry(() =>
-        adapter.complete({
-          model,
-          system: `${system}\n\n${rules}`,
-          prompt: attemptPrompt,
-          ...(native ? { jsonSchema } : {}),
-        }),
+      withRetry(
+        () =>
+          adapter.complete({
+            model,
+            system: `${system}\n\n${rules}`,
+            prompt: attemptPrompt,
+            ...(native ? { jsonSchema } : {}),
+          }),
+        () => transport_attempts++,
       ),
     );
     try {
       const parsed = schema.safeParse(JSON.parse(stripFences(raw)));
       if (parsed.success) {
-        return { data: parsed.data, structured_mode, schema_honored: attempt === 0 };
+        return {
+          data: parsed.data,
+          structured_mode,
+          transport_attempts,
+          repair_attempts,
+          schema_honored: repair_attempts === 0,
+        };
       }
       issues = JSON.stringify(parsed.error.issues);
     } catch (err) {

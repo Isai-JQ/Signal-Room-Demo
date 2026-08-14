@@ -55,6 +55,8 @@ test("429 backs off exponentially, then validates the repaired output", async ()
     });
     assert.deepEqual(out.data, { sentiment: "positive", themes: ["checkout speed"] });
     assert.equal(calls, 3, "two 429s should cost exactly two retries");
+    assert.equal(out.transport_attempts, 2);
+    assert.equal(out.repair_attempts, 0);
   } finally {
     restore();
   }
@@ -81,7 +83,37 @@ test("a schema miss gets one repair round-trip, and only one", async () => {
     // Native mode was requested, but the model needed the repair round-trip —
     // exactly the case the eval's schema_honored rate is meant to expose.
     assert.equal(out.structured_mode, "native");
+    assert.equal(out.repair_attempts, 1);
+    assert.equal(out.transport_attempts, 0);
     assert.equal(out.schema_honored, false);
+  } finally {
+    restore();
+  }
+});
+
+test("a transport retry does not count against schema_honored", async () => {
+  process.env.LLM_PROVIDER = "groq";
+  process.env.GROQ_API_KEY = "test-key";
+  process.env.LLM_RETRY_BASE_MS = "1";
+  let calls = 0;
+  const restore = stubFetch(async () =>
+    ++calls === 1
+      ? new Response("rate limit exceeded", { status: 429 })
+      : okBody('{"sentiment":"positive","themes":["checkout speed"]}'),
+  );
+  try {
+    const out = await complete({
+      task: "extraction",
+      system: SYSTEM,
+      prompt: PROMPT,
+      schema: Analysis,
+    });
+    assert.equal(calls, 2);
+    assert.equal(out.transport_attempts, 1);
+    // The model got the schema right on its only real attempt — a 429 is the
+    // provider's rate limit, not evidence the model ignores the schema.
+    assert.equal(out.repair_attempts, 0);
+    assert.equal(out.schema_honored, true);
   } finally {
     restore();
   }
