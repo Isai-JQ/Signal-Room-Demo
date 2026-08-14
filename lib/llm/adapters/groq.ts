@@ -5,9 +5,10 @@ export const groq = openAiCompat({
   baseUrl: () => "https://api.groq.com/openai/v1",
   apiKey: () => process.env.GROQ_API_KEY,
   models: {
-    reasoning: "llama-3.3-70b-versatile",
-    extraction: "llama-3.1-8b-instant",
-    drafting: "llama-3.3-70b-versatile",
+    // Only Groq models with json_schema + strict support
+    reasoning: "openai/gpt-oss-120b",
+    extraction: "openai/gpt-oss-120b",
+    drafting: "openai/gpt-oss-20b",
   },
   embeddingModel: null, // Groq serves no embedding models
   embeddingDim: 0,

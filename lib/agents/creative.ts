@@ -1,0 +1,86 @@
+// Creative: three drafts of the same brief, one per tone, then the brand gate.
+// The two halves are separate model calls on purpose — a drafter grading its own
+// draft is not a review.
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import type { db as Db } from "../db";
+import { brand_rules } from "../schema";
+import { Approval, Variant, type Brief, type Platform } from "../schemas";
+import { CREATIVE_SYSTEM, GATE_SYSTEM, TONES, creativePrompt, gatePrompt } from "./prompts/creative";
+import { runAgent } from "./run";
+
+/** id is minted here and the platform is the caller's call, so neither is the model's to set. */
+const VariantDraft = Variant.omit({ id: true, platform: true });
+
+const GateCall = z.object({
+  violations: Approval.shape.violations,
+});
+
+export async function draft(
+  db: typeof Db,
+  {
+    brief,
+    platform,
+    campaign_id = null,
+  }: { brief: Brief; platform: Platform; campaign_id?: string | null },
+): Promise<Variant[]> {
+  return Promise.all(
+    TONES.map(async (tone) => {
+      const out = await runAgent({
+        db,
+        // The tone is in the agent name so a trace shows which draft failed.
+        agent: `creative:${tone.id}`,
+        task: "drafting",
+        campaign_id,
+        system: CREATIVE_SYSTEM,
+        prompt: creativePrompt(brief, platform, tone.instruction),
+        schema: VariantDraft,
+      });
+      return Variant.parse({ ...out, id: randomUUID(), platform });
+    }),
+  );
+}
+
+/**
+ * Brand gate. Checked against every rule, not the five the Brief retrieved:
+ * enforcement is not a similarity search, and a rule that never surfaced is
+ * still a rule. Severity decides the verdict here, in code — `block` rejects the
+ * variant outright, `warn` sends it to the human gate.
+ */
+export async function gate(
+  db: typeof Db,
+  variants: Variant[],
+  { campaign_id = null }: { campaign_id?: string | null } = {},
+): Promise<Approval[]> {
+  const rules = await db
+    .select({ id: brand_rules.id, rule: brand_rules.rule, severity: brand_rules.severity })
+    .from(brand_rules);
+  if (rules.length === 0) throw new Error("no brand rules — run `pnpm seed` first");
+  const severity = new Map(rules.map((r) => [r.id, r.severity]));
+
+  return Promise.all(
+    variants.map(async (variant) => {
+      const out = await runAgent({
+        db,
+        agent: "guardian",
+        task: "reasoning",
+        campaign_id,
+        system: GATE_SYSTEM,
+        prompt: gatePrompt(variant, rules),
+        schema: GateCall,
+      });
+
+      // A violation of a rule that does not exist is not a violation.
+      // `?? []` because the schema defaults it: a model that finds nothing may
+      // leave the key out entirely rather than send an empty array.
+      const violations = (out.violations ?? []).filter((v) => severity.has(v.rule_id));
+      const verdict = violations.some((v) => severity.get(v.rule_id) === "block")
+        ? "rejected"
+        : violations.length > 0
+          ? "needs_human"
+          : "approved";
+
+      return Approval.parse({ variant_id: variant.id, verdict, violations, reviewer: "agent" });
+    }),
+  );
+}

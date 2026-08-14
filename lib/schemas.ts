@@ -17,14 +17,26 @@ export const Comment = z.object({
   posted_at: z.string().datetime(),
 });
 
-/** A theme several comments share. Produced by the extraction agent. */
+/**
+ * A theme several comments share. Produced by the analyst agent.
+ *
+ * `claim`, `summary`, `sentiment` and `confidence` come from the model.
+ * `volume` and `platforms` are counted in code from the evidence that survived
+ * the id check — a model asked to count its own citations gets it wrong.
+ */
 export const Signal = z.object({
   id: z.string().min(1),
-  label: z.string().min(1),
+  /** What the audience is saying, in one line. */
+  claim: z.string().min(1),
   summary: z.string().min(1),
   sentiment: z.enum(["positive", "negative", "neutral", "mixed"]),
-  comment_ids: z.array(z.string().min(1)).min(1),
-  confidence: z.number().min(0).max(1),
+  /** Comment ids the model cited, after they were checked against what it was sent. */
+  evidence_ids: z.array(z.string().min(1)).min(1),
+  /** How many comments back the claim: `evidence_ids.length`, never the model's count. */
+  volume: z.number().int().positive(),
+  platforms: z.array(Platform).min(1),
+  /** Coarse on purpose: a model's numeric self-score is noise dressed as precision. */
+  confidence: z.enum(["low", "medium", "high"]),
 });
 
 export const Brief = z.object({
@@ -33,6 +45,12 @@ export const Brief = z.object({
   angle: z.string().min(1),
   key_messages: z.array(z.string().min(1)).min(1).max(5),
   signal_ids: z.array(z.string().min(1)).min(1),
+  /**
+   * Brand rule ids the brief actually followed, after they were checked against
+   * the ones it was sent — same discipline as `Signal.evidence_ids`. Empty is a
+   * legitimate answer: none of the retrieved rules had to shape this brief.
+   */
+  brand_rules_applied: z.array(z.string().min(1)).default([]),
 });
 
 export const Variant = z.object({
@@ -55,15 +73,25 @@ export const Schedule = z.object({
   variant_id: z.string().min(1),
   publish_at: z.string().datetime(),
   timezone: z.string().min(1).default("UTC"),
+  /** Why that hour, in prose. The only part of a Schedule a model writes. */
+  rationale: z.string().min(1),
 });
 
-/** Also a column on `campaigns` so the pipeline can filter without opening the jsonb. */
+/**
+ * Also a column on `campaigns` so the pipeline can filter without opening the jsonb.
+ *
+ * The three verdict statuses are the gate's, verbatim: `rejected` and
+ * `needs_human` are terminal, `approved` means the agent gate passed and the
+ * campaign moves straight on to `awaiting_approval`, where it waits for a human.
+ */
 export const CampaignStatus = z.enum([
   "collecting",
   "signals",
   "brief",
   "variants",
-  "approval",
+  "rejected",
+  "approved",
+  "awaiting_approval",
   "scheduled",
   "needs_human",
 ]);
@@ -78,6 +106,8 @@ export const CampaignState = z.object({
   variants: z.array(Variant).default([]),
   approvals: z.array(Approval).default([]),
   schedule: z.array(Schedule).default([]),
+  /** Set only alongside `needs_human`: what threw, so the trace view has it without a join. */
+  error: z.string().nullable().default(null),
 });
 
 export type Platform = z.infer<typeof Platform>;

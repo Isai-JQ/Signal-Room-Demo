@@ -114,6 +114,7 @@ accepts the schema and then ignores it.
 - `pnpm db:push` — apply schema
 - `pnpm seed` — generate test comments
 - `pnpm test` — tests (`tsx` to run TypeScript)
+- `pnpm pipeline` — one full run against the DB, one line per status transition
 - `pnpm eval` — run the full pipeline with the active provider
 
 ## Environment variables
@@ -123,6 +124,7 @@ LLM_PROVIDER=groq            # groq | gemini | ollama
 EMBEDDING_PROVIDER=ollama    # ollama | gemini
 EMBEDDING_DIM=768
 LLM_CONCURRENCY=2
+ANALYST_SIMILARITY_THRESHOLD=0.75
 
 GROQ_API_KEY=
 GEMINI_API_KEY=
