@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { z } from "zod";
-import { complete } from "./provider";
+import { adapterFor, complete } from "./provider";
 
 // One schema, one prompt — every provider has to satisfy both.
 const Analysis = z.object({
@@ -10,17 +10,28 @@ const Analysis = z.object({
 });
 
 const SYSTEM = "You analyse social media comments for a marketing team.";
+// The prompt describes the task only — the shape comes from Analysis (claude.md).
 const PROMPT = `Comment: "The new checkout is so much faster, but the app still crashes on Android."
 
-Return JSON: {"sentiment": "positive"|"negative"|"neutral", "themes": ["short phrase", ...]} with 1-3 themes.`;
+Summarise the sentiment and the themes it raises.`;
 
 const okBody = (content: string) => Response.json({ choices: [{ message: { content } }] });
 
-function stubFetch(impl: (url: string) => Promise<Response>) {
+function stubFetch(impl: (url: string, init?: RequestInit) => Promise<Response>) {
   const real = globalThis.fetch;
   globalThis.fetch = impl as typeof fetch;
   return () => {
     globalThis.fetch = real;
+  };
+}
+
+/** supportsStructuredOutput is readonly by contract; tests need to flip it. */
+function withStructuredOutput(provider: string, value: boolean) {
+  const adapter = adapterFor(provider) as { supportsStructuredOutput: boolean };
+  const previous = adapter.supportsStructuredOutput;
+  adapter.supportsStructuredOutput = value;
+  return () => {
+    adapter.supportsStructuredOutput = previous;
   };
 }
 
@@ -42,7 +53,7 @@ test("429 backs off exponentially, then validates the repaired output", async ()
       prompt: PROMPT,
       schema: Analysis,
     });
-    assert.deepEqual(out, { sentiment: "positive", themes: ["checkout speed"] });
+    assert.deepEqual(out.data, { sentiment: "positive", themes: ["checkout speed"] });
     assert.equal(calls, 3, "two 429s should cost exactly two retries");
   } finally {
     restore();
@@ -65,8 +76,12 @@ test("a schema miss gets one repair round-trip, and only one", async () => {
       prompt: PROMPT,
       schema: Analysis,
     });
-    assert.equal(out.sentiment, "negative");
+    assert.equal(out.data.sentiment, "negative");
     assert.equal(calls, 2);
+    // Native mode was requested, but the model needed the repair round-trip —
+    // exactly the case the eval's schema_honored rate is meant to expose.
+    assert.equal(out.structured_mode, "native");
+    assert.equal(out.schema_honored, false);
   } finally {
     restore();
   }
@@ -126,10 +141,82 @@ test("two providers, one prompt, one schema (stubbed response shapes)", async ()
         }),
       ),
     );
-    for (const out of results) assert.ok(Analysis.safeParse(out).success);
-    assert.equal(results[0]?.sentiment, results[1]?.sentiment);
-    assert.deepEqual(results[1]?.themes, ["checkout speed", "android crashes"]);
+    for (const out of results) assert.ok(Analysis.safeParse(out.data).success);
+    assert.equal(results[0]?.data.sentiment, results[1]?.data.sentiment);
+    assert.deepEqual(results[1]?.data.themes, ["checkout speed", "android crashes"]);
   } finally {
+    restore();
+  }
+});
+
+test("native path sends the derived schema, and never puts it in the prompt", async () => {
+  process.env.GROQ_API_KEY = "test-key";
+  let body: Record<string, string> = {};
+  const restore = stubFetch(async (_url, init) => {
+    body = JSON.parse(String(init?.body));
+    return okBody('{"sentiment":"positive","themes":["checkout speed"]}');
+  });
+  const unflip = withStructuredOutput("groq", true);
+  try {
+    const out = await complete({
+      task: "extraction",
+      system: SYSTEM,
+      prompt: PROMPT,
+      schema: Analysis,
+      provider: "groq",
+    });
+    assert.equal(out.structured_mode, "native");
+    assert.equal(out.schema_honored, true);
+
+    const format = body.response_format as unknown as {
+      type: string;
+      json_schema: { schema: { properties: Record<string, unknown> } };
+    };
+    assert.equal(format.type, "json_schema");
+    // Derived from Zod, not hand-written: both fields must be present.
+    assert.deepEqual(Object.keys(format.json_schema.schema.properties).sort(), [
+      "sentiment",
+      "themes",
+    ]);
+
+    const messages = body.messages as unknown as { content: string }[];
+    assert.ok(
+      !messages.some((m) => m.content.includes('"properties"')),
+      "native mode must not also paste the schema into the prompt",
+    );
+  } finally {
+    unflip();
+    restore();
+  }
+});
+
+test("fallback path injects the derived schema into the prompt instead", async () => {
+  process.env.GROQ_API_KEY = "test-key";
+  let body: Record<string, string> = {};
+  const restore = stubFetch(async (_url, init) => {
+    body = JSON.parse(String(init?.body));
+    return okBody('{"sentiment":"positive","themes":["checkout speed"]}');
+  });
+  const unflip = withStructuredOutput("groq", false);
+  try {
+    const out = await complete({
+      task: "extraction",
+      system: SYSTEM,
+      prompt: PROMPT,
+      schema: Analysis,
+      provider: "groq",
+    });
+    assert.equal(out.structured_mode, "fallback");
+    assert.equal(out.schema_honored, true);
+    assert.deepEqual(body.response_format, { type: "json_object" });
+
+    const messages = body.messages as unknown as { content: string }[];
+    const system = messages.find((m) => m.content.startsWith(SYSTEM))?.content ?? "";
+    // The enum lives in the Zod schema only, so seeing it proves it was derived.
+    assert.ok(system.includes('"neutral"'), "schema should be serialised into the prompt");
+    assert.ok(system.includes("themes"));
+  } finally {
+    unflip();
     restore();
   }
 });
@@ -164,8 +251,8 @@ test("same prompt, same schema, every reachable provider", async (t) => {
         provider,
       });
       // complete() already validated; assert again so the intent is explicit.
-      assert.ok(Analysis.safeParse(out).success);
-      assert.ok(out.themes.length >= 1);
+      assert.ok(Analysis.safeParse(out.data).success);
+      assert.ok(out.data.themes.length >= 1);
     });
   }
 });

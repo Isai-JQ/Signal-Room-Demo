@@ -11,4 +11,5 @@ export const groq = openAiCompat({
   },
   embeddingModel: null, // Groq serves no embedding models
   embeddingDim: 0,
+  supportsStructuredOutput: true,
 });

@@ -1,5 +1,6 @@
 import type { z } from "zod";
-import { withLimit, withRetry, type Adapter, type Task } from "./http";
+import { zodToJsonSchema } from "zod-to-json-schema";
+import { withLimit, withRetry, type Adapter, type JsonSchema, type Task } from "./http";
 import { gemini } from "./adapters/gemini";
 import { groq } from "./adapters/groq";
 import { ollama } from "./adapters/ollama";
@@ -47,6 +48,17 @@ const JSON_RULES =
 const stripFences = (raw: string) =>
   raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 
+/** How the schema reached the model — persisted on agent_events. */
+export type StructuredMode = "native" | "fallback";
+
+export type Completion<T> = {
+  data: T;
+  /** What we asked for. */
+  structured_mode: StructuredMode;
+  /** What we got: the first attempt validated, no repair round-trip needed. */
+  schema_honored: boolean;
+};
+
 export async function complete<T>({
   task,
   system,
@@ -59,9 +71,19 @@ export async function complete<T>({
   prompt: string;
   schema: z.ZodType<T>;
   provider?: string;
-}): Promise<T> {
+}): Promise<Completion<T>> {
   const adapter = adapterFor(provider);
   const model = adapter.models[task];
+
+  // claude.md: the Zod schema is the only source of truth for the output shape.
+  const jsonSchema = zodToJsonSchema(schema, { $refStrategy: "none" }) as JsonSchema;
+  const native = adapter.supportsStructuredOutput;
+  const structured_mode: StructuredMode = native ? "native" : "fallback";
+
+  const rules = native
+    ? JSON_RULES
+    : `${JSON_RULES}\n\nIt must validate against this JSON Schema:\n${JSON.stringify(jsonSchema)}`;
+
   let attemptPrompt = prompt;
   let raw = "";
   let issues = "";
@@ -72,14 +94,17 @@ export async function complete<T>({
       withRetry(() =>
         adapter.complete({
           model,
-          system: `${system}\n\n${JSON_RULES}`,
+          system: `${system}\n\n${rules}`,
           prompt: attemptPrompt,
+          ...(native ? { jsonSchema } : {}),
         }),
       ),
     );
     try {
       const parsed = schema.safeParse(JSON.parse(stripFences(raw)));
-      if (parsed.success) return parsed.data;
+      if (parsed.success) {
+        return { data: parsed.data, structured_mode, schema_honored: attempt === 0 };
+      }
       issues = JSON.stringify(parsed.error.issues);
     } catch (err) {
       issues = `output was not valid JSON: ${(err as Error).message}`;

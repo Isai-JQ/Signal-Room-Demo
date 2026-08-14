@@ -1,76 +1,113 @@
 # Signal Room
 
-Pipeline multi-agente que convierte comentarios de redes sociales en briefs de campaña aprobados.
+Multi-agent pipeline that turns social media comments into approved campaign briefs.
 
-## Reglas de arquitectura (no negociables)
+## Architecture rules (non-negotiable)
 
-- Los agentes se comunican SOLO vía el objeto `CampaignState` validado con Zod.
-  Nunca pasar texto libre entre agentes.
-- Todo output de LLM se valida contra su schema Zod antes de persistirse.
-  Si falla, reintentar una vez con el error inyectado en el prompt; si vuelve a
-  fallar, marcar la campaña como `needs_human` y detener el pipeline.
-- Toda corrida de agente escribe una fila en `agent_events`. Sin excepción.
-- Las API keys solo se usan en Route Handlers del servidor.
-  Nunca importar un SDK de LLM en un componente cliente.
+- Agents communicate ONLY through the `CampaignState` object validated with Zod.
+  Never pass free text between agents.
+- Every LLM output is validated against its Zod schema before being persisted.
+  On failure, a single repair round-trip with the Zod issues injected into the
+  prompt; if it fails again, throw `SchemaValidationError` and mark the campaign
+  as `needs_human`.
+- Every agent run writes a row to `agent_events`, failed attempts included.
+  No exceptions.
+- API keys are used only in server Route Handlers. Never import an LLM client
+  into a client component.
+- The Zod schemas in `lib/schemas.ts` are the ONLY source of truth for the shape
+  of the data. No prompt describes the output structure by hand: the JSON Schema
+  is derived from the Zod schema.
 
-## Independencia de proveedor
+## Provider independence
 
-El proyecto NO depende de ningún proveedor de LLM en particular. Toda llamada a
-un modelo pasa por `lib/llm/provider.ts`, que expone dos funciones:
+Every model call goes through `lib/llm/provider.ts`:
 
 ```ts
-complete({ task, prompt, schema }): Promise<T>   // generación estructurada
-embed(texts: string[]): Promise<number[][]>       // embeddings
+complete<T>({ task, system, prompt, schema }):
+  Promise<{ data: T; structured_mode; schema_honored }>
+embed(texts: string[]): Promise<number[][]>
 ```
 
-Reglas para esta capa:
+Rules:
 
-- El proveedor activo se elige con `LLM_PROVIDER` y `EMBEDDING_PROVIDER` en el
-  entorno. Agregar un proveedor nuevo significa escribir un adaptador, no tocar
-  ningún agente.
-- Los agentes declaran un `task` semántico (`"reasoning"` | `"extraction"` |
-  `"drafting"`), nunca un nombre de modelo. El mapeo task → modelo vive en la
-  config del proveedor.
-- El `EMBEDDING_DIM` se lee del entorno porque varía por proveedor. La columna
-  vector de Postgres se genera a partir de ese valor; no hardcodear 1024.
-- Manejar 429 con backoff exponencial (1s, 2s, 4s) y un máximo de 3 intentos.
-  Los tiers gratuitos tienen rate limits agresivos y esto no es opcional.
-- Registrar `provider` y `model` en cada fila de `agent_events`, para poder
-  comparar calidad y latencia entre proveedores después.
+- The active provider comes from `LLM_PROVIDER` and `EMBEDDING_PROVIDER`. Adding
+  a provider means writing an adapter, never touching an agent.
+- Agents declare a semantic `task` (`"reasoning"` | `"extraction"` |
+  `"drafting"`), never a model name. The mapping lives in the adapter.
+- Every adapter declares `supportsStructuredOutput`. If `true`, the JSON Schema
+  derived from Zod is passed through the provider's native mechanism. If
+  `false`, it is injected into the prompt as a fallback.
+- `EMBEDDING_DIM` is read from the environment. Width validation happens twice:
+  against the dimension the adapter declares, and against every returned vector.
+  A wrong-width vector in pgvector is silent corruption, so we throw instead of
+  inserting.
+- Retries on 429 and 5xx: the initial call plus up to 3 retries, waiting 1s, 2s
+  and 4s. The provider's `Retry-After` header wins over the computed delay.
+- Prompts in `lib/agents/prompts/` are neutral: no XML tags, no syntax specific
+  to any provider.
 
-### Proveedores soportados
+### Providers
 
-| Proveedor | Uso | Notas |
+| Provider | Use | Notes |
 |---|---|---|
-| Groq | generación | Tier gratis sin tarjeta. Muy rápido. Límites a nivel organización. |
-| Google Gemini | generación y embeddings | Tier gratis sin tarjeta. En el tier gratis los datos pueden usarse para entrenar. |
-| Ollama | embeddings (y generación local) | Corre local, sin límites ni costo, los datos no salen de la máquina. |
-| Anthropic / OpenAI | generación | De pago. Adaptadores incluidos para poder comparar calidad. |
+| Groq | generation | Free tier, no card. Rate limits are org-wide. |
+| Google Gemini | generation and embeddings | Free tier, no card. Data may be used for training. |
+| Ollama | local embeddings and generation | No limits, no cost. Data never leaves the machine. |
 
-**Regla de datos:** nada de contenido real de usuarios se manda a un tier gratuito
-que pueda usarse para entrenamiento. El seed de desarrollo es sintético.
+Anthropic and OpenAI are out of scope for the demo; the provider layer supports
+them if you want a comparison against paid models.
 
-## Convenciones
+**Data rule:** no real user content goes to a free tier that may train on it.
+The development seed is synthetic.
 
-- Server Components por defecto; `"use client"` solo donde haya interactividad.
-- Los schemas Zod viven en `lib/schemas.ts` y son la única fuente de verdad de tipos.
-- Los prompts viven en `lib/agents/prompts/` como archivos separados, no inline.
-  Deben ser neutrales de proveedor: sin sintaxis específica de ningún SDK.
-- Sin `any`. Sin `console.log` en código que se commitea.
+## Known limitations
 
-## Comandos
+Document them, don't hide them. They go in the README.
 
-- `pnpm dev` — servidor de desarrollo
-- `pnpm db:push` — aplicar schema
-- `pnpm seed` — generar comentarios de prueba
-- `pnpm eval` — correr el pipeline contra el set de prueba con el proveedor activo
+- The concurrency limiter (`lib/llm/http.ts`) is process-local. With several
+  server instances it does not coordinate, so the effective RPM is multiplied by
+  the number of instances. The real fix would be a shared token bucket or a
+  queue with a single worker per provider; out of scope for the demo.
 
-## Variables de entorno
+## Observability
+
+`agent_events` stores per run: `agent`, `task`, `provider`, `model`,
+`structured_mode` (`native` | `fallback`), `schema_honored` (bool),
+`input_hash`, `output`, `tokens`, `latency_ms`, `attempt`, `error`, `ts`.
+
+The last two are deliberately separate: `structured_mode` is what was asked for,
+`schema_honored` is what happened — whether the first attempt validated against
+Zod without needing the repair round-trip.
+
+`pnpm eval` reports the `schema_honored` rate per provider and model. That is
+the metric that tells you whether native structured output actually works on
+that model: `structured_mode = native` with a low rate means the provider
+accepts the schema and then ignores it.
+
+## Conventions
+
+- Server Components by default; `"use client"` only where there is interactivity.
+- Types derived with `z.infer`, never written by hand.
+- No `any`. No `console.log` in committed code.
+- Code and comments in English, including this file.
+- Tests with `node:test`. Ones that hit real APIs are skipped when keys are
+  missing; a stubbed-response variant must always exist.
+
+## Commands
+
+- `pnpm dev` — development server
+- `pnpm db:push` — apply schema
+- `pnpm seed` — generate test comments
+- `pnpm test` — tests (`tsx` to run TypeScript)
+- `pnpm eval` — run the full pipeline with the active provider
+
+## Environment variables
 
 ```
-LLM_PROVIDER=groq            # groq | gemini | ollama | anthropic | openai
-EMBEDDING_PROVIDER=ollama    # ollama | gemini | openai
+LLM_PROVIDER=groq            # groq | gemini | ollama
+EMBEDDING_PROVIDER=ollama    # ollama | gemini
 EMBEDDING_DIM=768
+LLM_CONCURRENCY=2
 
 GROQ_API_KEY=
 GEMINI_API_KEY=

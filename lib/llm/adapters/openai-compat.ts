@@ -9,6 +9,7 @@ type Config = {
   models: Record<Task, string>;
   embeddingModel: string | null;
   embeddingDim: number;
+  supportsStructuredOutput: boolean;
 };
 
 export function openAiCompat(cfg: Config): Adapter {
@@ -25,8 +26,9 @@ export function openAiCompat(cfg: Config): Adapter {
     models: cfg.models,
     embeddingModel: cfg.embeddingModel,
     embeddingDim: cfg.embeddingDim,
+    supportsStructuredOutput: cfg.supportsStructuredOutput,
 
-    async complete({ model, system, prompt }) {
+    async complete({ model, system, prompt, jsonSchema }) {
       const res = await request<{
         choices?: { message?: { content?: string | null } }[];
       }>(`${cfg.baseUrl()}/chat/completions`, {
@@ -35,7 +37,12 @@ export function openAiCompat(cfg: Config): Adapter {
         body: JSON.stringify({
           model,
           temperature: 0,
-          response_format: { type: "json_object" },
+          // ponytail: no `strict: true` — it demands every property in
+          // `required` and rejects optionals. Add it if a model ignores the
+          // schema in non-strict mode.
+          response_format: jsonSchema
+            ? { type: "json_schema", json_schema: { name: "output", schema: jsonSchema } }
+            : { type: "json_object" },
           messages: [
             { role: "system", content: system },
             { role: "user", content: prompt },

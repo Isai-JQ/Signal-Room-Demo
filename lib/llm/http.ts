@@ -3,6 +3,9 @@
 
 export type Task = "reasoning" | "extraction" | "drafting";
 
+/** What zod-to-json-schema hands back. Opaque here — adapters just forward it. */
+export type JsonSchema = Record<string, unknown>;
+
 export type Adapter = {
   readonly name: string;
   /** task → concrete model. Agents never name a model; see claude.md. */
@@ -10,7 +13,15 @@ export type Adapter = {
   /** null when the provider has no embedding endpoint (e.g. Groq). */
   readonly embeddingModel: string | null;
   readonly embeddingDim: number;
-  complete(args: { model: string; system: string; prompt: string }): Promise<string>;
+  /** true → honours `jsonSchema` natively; false → provider.ts prompts it instead. */
+  readonly supportsStructuredOutput: boolean;
+  complete(args: {
+    model: string;
+    system: string;
+    prompt: string;
+    /** Only passed when supportsStructuredOutput is true. */
+    jsonSchema?: JsonSchema;
+  }): Promise<string>;
   embed(args: { model: string; texts: string[] }): Promise<number[][]>;
 };
 

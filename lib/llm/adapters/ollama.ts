@@ -10,4 +10,5 @@ export const ollama = openAiCompat({
   },
   embeddingModel: "nomic-embed-text",
   embeddingDim: 768,
+  supportsStructuredOutput: true,
 });
