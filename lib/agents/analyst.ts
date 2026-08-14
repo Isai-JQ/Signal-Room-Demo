@@ -18,6 +18,8 @@ const AnalystSignal = Signal.omit({ id: true, volume: true, platforms: true });
 
 /** Cosine cut-off for "same theme". Tune it against the corpus, not in theory. */
 const envThreshold = () => Number(process.env.ANALYST_SIMILARITY_THRESHOLD ?? 0.75);
+/** Above this, two comments are one sentence wearing different punctuation. */
+const envNearDuplicate = () => Number(process.env.NEAR_DUPLICATE_THRESHOLD ?? 0.95);
 const REPRESENTATIVES = 30;
 
 export type Embedded = { id: string; text: string; platform: Platform; embedding: number[] };
@@ -29,30 +31,66 @@ const unit = (v: number[]) => {
 
 /**
  * Densest neighbourhood rather than full agglomerative clustering: for every
- * comment, count how many others sit within `threshold` cosine similarity, keep
- * the biggest neighbourhood, and return its closest `take` members.
+ * comment, collect the others within `threshold` cosine similarity, keep the
+ * neighbourhood with the best density score, and return its closest `take`
+ * members.
  *
- * ponytail: O(n²) over the corpus — 400 comments is a fraction of a second and
- * the seed is fixed. Push it into pgvector (`<=>` plus a lateral join) if the
- * corpus ever stops fitting in memory.
+ * The score counts *distinct wordings*, not members: anything within
+ * `nearDuplicate` of a comment already counted adds nothing to it. Raw counts
+ * hand the win to whichever sentence got copied most — eleven decorations of one
+ * line beat eight genuinely different ways of asking for the same thing, which
+ * is backwards. Near-duplicates stay in the returned cluster; they are still
+ * evidence, they just stop voting twice.
+ *
+ * ponytail: O(n²) over the corpus and a greedy first-wins dedup rather than an
+ * exact cover — 400 comments is a fraction of a second and the seed is fixed.
+ * Push it into pgvector (`<=>` plus a lateral join) if the corpus ever stops
+ * fitting in memory.
  */
-export function densestCluster(rows: Embedded[], threshold: number, take: number): Embedded[] {
+export function densestCluster(
+  rows: Embedded[],
+  threshold: number,
+  take: number,
+  nearDuplicate = envNearDuplicate(),
+): Embedded[] {
   const units = rows.map((r) => unit(r.embedding));
-  let best: { at: number; sim: number }[] = [];
-  for (const a of units) {
-    const near: { at: number; sim: number }[] = [];
-    for (let j = 0; j < units.length; j++) {
+  const n = units.length;
+  // Every pair is needed twice over (neighbourhoods, then dedup inside them), so
+  // the dot products are computed once up front rather than in both loops.
+  const sims = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) {
+    const a = units[i]!;
+    for (let j = i; j < n; j++) {
       const b = units[j]!;
       let sim = 0;
       for (let k = 0; k < a.length; k++) sim += a[k]! * b[k]!;
+      sims[i * n + j] = sim;
+      sims[j * n + i] = sim;
+    }
+  }
+
+  let best: { at: number; sim: number }[] = [];
+  let bestScore = 0;
+  for (let i = 0; i < n; i++) {
+    const near: { at: number; sim: number }[] = [];
+    for (let j = 0; j < n; j++) {
+      const sim = sims[i * n + j]!;
       if (sim >= threshold) near.push({ at: j, sim });
     }
-    if (near.length > best.length) best = near;
+    near.sort((x, y) => y.sim - x.sim);
+
+    // Closest-first, so the wording each duplicate collapses into is the one
+    // nearest the anchor.
+    const distinct: number[] = [];
+    for (const m of near) {
+      if (!distinct.some((d) => sims[d * n + m.at]! >= nearDuplicate)) distinct.push(m.at);
+    }
+    if (distinct.length > bestScore) {
+      bestScore = distinct.length;
+      best = near;
+    }
   }
-  return best
-    .sort((x, y) => y.sim - x.sim)
-    .slice(0, take)
-    .map((m) => rows[m.at]!);
+  return best.slice(0, take).map((m) => rows[m.at]!);
 }
 
 export async function analyze(

@@ -42,7 +42,11 @@ export const Signal = z.object({
 export const Brief = z.object({
   headline: z.string().min(1),
   audience: z.string().min(1),
+  /** The concept of the video the creator shoots, in one line. Not a message to the audience. */
   angle: z.string().min(1),
+  /** Where it is shot for and how long it runs, e.g. "TikTok, 30-45s, vertical". */
+  format: z.string().min(1),
+  /** What has to be said on camera. */
   key_messages: z.array(z.string().min(1)).min(1).max(5),
   signal_ids: z.array(z.string().min(1)).min(1),
   /**
@@ -53,9 +57,18 @@ export const Brief = z.object({
   brand_rules_applied: z.array(z.string().min(1)).default([]),
 });
 
+/** The three shooting treatments. Lives here, not in the prompt file, because it is on Variant. */
+export const Treatment = z.enum(["demo", "story", "proof"]);
+
+/** One way of shooting the brief's angle — a production instruction, never a reply to anyone. */
 export const Variant = z.object({
   id: z.string().min(1),
   platform: Platform,
+  /** Which treatment shot this. Set from the fan-out, so a run can be checked for real variety. */
+  treatment: Treatment,
+  /** Opening lines to camera — alternatives, not a sequence. First words of the video. */
+  hooks: z.array(z.string().min(1)).min(2).max(3),
+  /** Direction for the creator: what happens on camera, in order. */
   body: z.string().min(1),
   hashtags: z.array(z.string().min(1)).max(10).default([]),
 });
@@ -114,6 +127,7 @@ export type Platform = z.infer<typeof Platform>;
 export type Comment = z.infer<typeof Comment>;
 export type Signal = z.infer<typeof Signal>;
 export type Brief = z.infer<typeof Brief>;
+export type Treatment = z.infer<typeof Treatment>;
 export type Variant = z.infer<typeof Variant>;
 export type Approval = z.infer<typeof Approval>;
 export type Schedule = z.infer<typeof Schedule>;

@@ -37,17 +37,25 @@ const brief: Brief = {
   headline: "On feet, on the street",
   audience: "Sneaker buyers who distrust unboxings",
   angle: "Show the shoe being worn, not displayed",
+  format: "TikTok, 30-45s, vertical",
   key_messages: ["A wear test is coming"],
   signal_ids: ["sig-1"],
   brand_rules_applied: ["r2"],
 };
 
-test("three tones, three drafts, ids and platform set here", async () => {
+test("three treatments, three drafts, ids and platform set here", async () => {
   process.env.LLM_PROVIDER = "groq";
   process.env.GROQ_API_KEY = "test-key";
   const { prompts, restore } = stubFetch(
     [0, 1, 2].map((i) =>
-      JSON.stringify({ body: `draft ${i}`, hashtags: ["onfeet"], id: "model-picked", platform: "x" }),
+      JSON.stringify({
+        body: `draft ${i}`,
+        hooks: ["lace up", "day one"],
+        hashtags: ["onfeet"],
+        id: "model-picked",
+        platform: "x",
+        treatment: "story",
+      }),
     ),
   );
   const { db, events } = fakeDb([]);
@@ -57,10 +65,15 @@ test("three tones, three drafts, ids and platform set here", async () => {
     assert.equal(new Set(variants.map((v) => v.id)).size, 3, "ids are minted here");
     assert.ok(!variants.some((v) => v.id === "model-picked"), "never the model's id");
     assert.ok(variants.every((v) => v.platform === "tiktok"), "never the model's platform");
+    assert.deepEqual(
+      variants.map((v) => v.treatment),
+      ["demo", "story", "proof"],
+      "the treatment is the fan-out's, not the model's",
+    );
     assert.equal(
       new Set(prompts).size,
       3,
-      "three distinct tone instructions, not the same prompt three times",
+      "three distinct treatment instructions, not the same prompt three times",
     );
     assert.equal(events.length, 3, "one agent_event per draft");
     assert.deepEqual(
@@ -80,6 +93,8 @@ const rules = [
 const variant = (id: string): Variant => ({
   id,
   platform: "tiktok",
+  treatment: "demo",
+  hooks: ["first line", "other first line"],
   body: `post ${id}`,
   hashtags: [],
 });

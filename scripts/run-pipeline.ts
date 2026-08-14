@@ -30,7 +30,17 @@ async function main() {
   p(`status:      ${state.status}`);
   p(`signal:      ${state.signals[0]?.claim ?? "—"}`);
   p(`brief:       ${state.brief?.headline ?? "—"}`);
+  p(`angle:       ${state.brief?.angle ?? "—"}`);
+  p(`format:      ${state.brief?.format ?? "—"}`);
   p(`variants:    ${state.variants.length}`);
+  // Hooks and full direction, treatment-labelled: three shoots that read the
+  // same — or read as replies to the audience — is the failure this print exists
+  // to catch, and a truncated preview would hide it.
+  for (const v of state.variants) {
+    p(`  [${v.treatment}]`);
+    for (const h of v.hooks) p(`    hook: ${h}`);
+    p(`    ${v.body.replace(/\n/g, "\n    ")}`);
+  }
   p(
     `verdicts:    ${state.approvals.map((a) => a.verdict).join(", ") || "—"}` +
       (state.approvals.some((a) => a.violations.length)

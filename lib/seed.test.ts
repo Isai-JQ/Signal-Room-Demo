@@ -7,7 +7,7 @@ const digest = (rows: unknown) => createHash("sha256").update(JSON.stringify(row
 
 // Pinned so drift is caught across processes too, not just within one run.
 // Changing the corpus on purpose means updating this line in the same commit.
-const EXPECTED = "636af2e8fcca920c7d551d5d544d696366aecfcc4ece6bee448b8c72220719a7";
+const EXPECTED = "47d844be81a4f3339b72a5d6c04774a780f3e0510b128ca8bfdb5b070ee1e478";
 
 test("the seed corpus is identical on every run", () => {
   const rows = generateComments();

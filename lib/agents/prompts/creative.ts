@@ -1,51 +1,73 @@
 // Neutral prompts (claude.md): no XML tags, no provider-specific syntax, and no
 // hand-written description of the output shape — that is derived from the Zod
 // schema by lib/llm/provider.ts.
-import type { Brief, Platform, Variant } from "../../schemas";
+import type { Brief, Platform, Treatment, Variant } from "../../schemas";
 
 export const CREATIVE_SYSTEM = [
-  "You write one social post for a brand, working only from the campaign brief you are given.",
-  "The headline, the angle and the key messages are what the post has to carry —",
-  "do not introduce a claim, an offer or a date that is not in the brief.",
-  "Write it native to the platform you are told to write for, and follow the tone instruction exactly.",
+  "You write the production treatment for one video, working only from the brief you are given.",
+  "The brief's angle is the concept and it is fixed: your job is one way of shooting it, not a different idea.",
+  "body is direction for the creator — what happens on camera, beat by beat, in the order it is filmed.",
+  "hooks are the opening lines the creator says to camera, the first words of the video:",
+  "alternatives to pick from, not a sequence, and never a greeting or a thank-you.",
+  "Nothing you write is addressed to a commenter or gets posted as text — this is a shot list, not a reply.",
+  "Carry the key messages and introduce no claim, offer or date that is not in the brief.",
+  "Stay inside the platform and run time the brief's format gives you.",
 ].join(" ");
 
-/** Three tones, three drafts, so the human gate picks rather than edits. */
-export const TONES = [
+/**
+ * Three treatments, three shoots, so the human gate picks rather than edits.
+ *
+ * Each instruction fixes how the video is built — what the first shot is, what a
+ * beat is, what the hooks do — not just its mood. Three moods got three
+ * rewrites of one script back; a different skeleton per treatment is what makes
+ * them pickable.
+ */
+export const TREATMENTS = [
   {
-    id: "direct",
-    instruction:
-      "Direct and plain. Short sentences, no jokes, no rhetorical questions. Say the thing and stop.",
+    id: "demo",
+    instruction: [
+      "Straight demonstration. First shot is the thing itself being used — no title card, no intro, no talking head.",
+      "Three or four beats, each one thing the camera shows, in filming order.",
+      "Hooks are flat statements of what the viewer is about to see. No questions, no jokes.",
+    ].join(" "),
   },
   {
-    id: "playful",
-    instruction:
-      "Playful and quick. Light humour, a wink at the comment section, still respectful of anyone in it.",
+    id: "story",
+    instruction: [
+      "First-person story. The creator narrates one continuous run of events — a day, a session, a trip —",
+      "and the subject appears inside it rather than being presented to camera.",
+      "Beats are moments in time, not features. Hooks drop the viewer mid-scene, before any context.",
+    ].join(" "),
   },
   {
-    id: "warm",
-    instruction:
-      "Warm and conversational. Speak to one reader, acknowledge what they asked for, unhurried.",
+    id: "proof",
+    instruction: [
+      "Side-by-side test. Name the two conditions the camera can show back to back in the first beat,",
+      "then the comparison shot, then what it settles. Claim nothing the shot does not show.",
+      "Hooks state the test being run, never its result. Shortest of the three.",
+    ].join(" "),
   },
-] as const;
+] as const satisfies readonly { id: Treatment; instruction: string }[];
 
-export const creativePrompt = (brief: Brief, platform: Platform, tone: string) =>
+export const creativePrompt = (brief: Brief, platform: Platform, treatment: string) =>
   [
     `Platform: ${platform}`,
-    `Tone: ${tone}`,
+    `Treatment: ${treatment}`,
     "",
     "Brief:",
     `headline: ${brief.headline}`,
     `audience: ${brief.audience}`,
-    `angle: ${brief.angle}`,
-    "key messages:",
+    `angle (the concept — shoot this, do not replace it): ${brief.angle}`,
+    `format: ${brief.format}`,
+    "must be said on camera:",
     ...brief.key_messages.map((m) => `- ${m}`),
   ].join("\n");
 
 export const GATE_SYSTEM = [
-  "You check a drafted social post against a brand's published rules.",
-  "Report every rule the post breaks, one entry per rule, quoting the part of the post that breaks it.",
-  "Judge only what the post actually says: a rule it does not break is not reported,",
+  "You check a video's production brief against a brand's content limits —",
+  "what the creator is allowed to say and show on camera.",
+  "Report every rule the brief breaks, one entry per rule, quoting the hook or the direction that breaks it.",
+  "Judge only what the brief actually tells the creator to say: a rule it does not break is not reported,",
   "and a rule it obeys is not a violation.",
   "Use only rule ids that appear verbatim in the list you were given.",
   "Never invent, reformat or complete an id. If you are unsure about an id, leave it out.",
@@ -54,10 +76,13 @@ export const GATE_SYSTEM = [
 /** No severities in the prompt: what a violation costs is decided in code, not by the model. */
 export const gatePrompt = (variant: Variant, rules: { id: string; rule: string }[]) =>
   [
-    `Post (${variant.platform}):`,
+    `Video brief (${variant.platform}, ${variant.treatment}):`,
+    "hooks to camera:",
+    ...variant.hooks.map((h) => `- ${h}`),
+    "direction:",
     variant.body,
     ...(variant.hashtags.length
-      ? [variant.hashtags.map((h) => `#${h.replace(/^#/, "")}`).join(" ")]
+      ? [`caption tags: ${variant.hashtags.map((h) => `#${h.replace(/^#/, "")}`).join(" ")}`]
       : []),
     "",
     `Brand rules (${rules.length}), one per line as "id: rule":`,

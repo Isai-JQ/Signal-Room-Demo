@@ -109,7 +109,9 @@ export const TOPICS = {
     "more of these on my feed thanks",
     "episode two, don't leave us hanging",
     "same format, different pair",
-    "keep going, I subscribed for exactly this",
+    "hit subscribe, now earn it",
+    "notifications on, do not waste them",
+    "signed up purely for content like that",
     "cliffhanger ending, where is the rest",
     "long term review in six months?",
     "compare them against last year's model",
@@ -165,31 +167,35 @@ export function generateComments(): Comment[] {
 }
 
 /**
- * What the approval agent checks drafts against, via RAG over the embeddings.
- * Every rule is written so at least one TOPICS group retrieves it — the bracket
- * names which. A rule no comment can pull back teaches nothing about the RAG
- * step, so it doesn't belong here.
+ * Content limits on what the creator may say on camera. The approval agent
+ * checks briefs against them via RAG over the embeddings.
+ *
+ * They are constraints on the script, not on replies to the audience — written
+ * that way on purpose, because rules phrased as reply etiquette pull the whole
+ * pipeline into community-manager mode. Every rule is written so at least one
+ * TOPICS group retrieves it — the bracket names which. A rule no comment can
+ * pull back teaches nothing about the RAG step, so it doesn't belong here.
  * `block` rejects the variant, `warn` sends it to the human gate.
  */
 export const BRAND_RULES = [
   // price
-  { rule: "Give the price plainly when asked. Do not defend it, apologise for it, or tell anyone what they can afford.", severity: "warn" },
-  { rule: "Never mention a discount, code, sale or drop price that is not live on the brand's own store right now.", severity: "block" },
-  { rule: "No superlatives or speculation about what a pair costs: not cheap, not a steal, not an investment, and never what it will resell for.", severity: "block" },
+  { rule: "If the script names the price, it names the one on the product page and moves on. Never defend it, apologise for it, or tell the viewer what they can afford.", severity: "warn" },
+  { rule: "Never say a discount, code, sale or drop price on camera that is not live on the brand's own store right now.", severity: "block" },
+  { rule: "No superlatives or speculation on camera about what a pair costs: not cheap, not a steal, not an investment, and never what it will resell for.", severity: "block" },
   // what not to promise
-  { rule: "Never give a date for a follow-up video, a restock or an unannounced colourway. Nothing to announce yet is the entire answer.", severity: "block" },
-  { rule: "A request for more content gets noted, never promised. Do not commit the creator to filming anything in a public reply.", severity: "warn" },
+  { rule: "Never give a date on camera for a follow-up video, a restock or an unannounced colourway. There is nothing to announce.", severity: "block" },
+  { rule: "The script may say more is being filmed; it may never promise the viewer a specific next video, series or upload day.", severity: "warn" },
   // comparisons
-  { rule: "Never name another brand or a rival model in a reply, flattering or not, even when the comment names it first.", severity: "block" },
+  { rule: "Never name another brand or a rival model on camera, flattering or not, and never shoot one in frame.", severity: "block" },
   // the product on camera
-  { rule: "When someone says the colour or shape is off from real life, put it on the lighting and the lens. Never suggest their screen or their eyes are wrong.", severity: "warn" },
+  { rule: "If the script addresses colour or shape reading differently in person, it puts that on the lighting and the lens. Never on the viewer's screen or eyes.", severity: "warn" },
   { rule: "Never state a material, measurement or colourway name that is not printed on the product page.", severity: "block" },
-  { rule: "No claims about fit, sizing, comfort or how a pair wears over time until someone has actually worn them.", severity: "block" },
-  // tone in public
-  { rule: "Criticism of the video itself gets one line: thanks, noted. No excuses, no gear list, no arguing back.", severity: "warn" },
-  { rule: "A hostile or sarcastic comment gets the same neutral tone as a kind one. Never match the sarcasm.", severity: "block" },
+  { rule: "No claim on camera about fit, sizing, comfort or how a pair wears over time unless the creator has actually worn the pair being filmed.", severity: "block" },
+  // the creator on camera
+  { rule: "Feedback about an earlier video gets at most one line on camera: heard, moving on. No excuses, no gear list, no arguing with anyone.", severity: "warn" },
+  { rule: "Never read out, quote or answer a hostile comment on camera, and never match its tone. The video is not a reply.", severity: "block" },
   // hand off to the team
-  { rule: "Refunds, orders, faulty pairs, and anything about a paid partnership go to the team before a word is posted. Never ask for an order number, email or address in public.", severity: "block" },
+  { rule: "Refunds, orders, faulty pairs and anything about a paid partnership stay out of the script and go to the team. Never ask a viewer on camera for an order number, email or address.", severity: "block" },
 ] as const satisfies { rule: string; severity: "block" | "warn" }[];
 
 async function main() {

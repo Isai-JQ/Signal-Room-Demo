@@ -1,4 +1,4 @@
-// Creative: three drafts of the same brief, one per tone, then the brand gate.
+// Creative: three treatments of the same brief's angle, then the brand gate.
 // The two halves are separate model calls on purpose — a drafter grading its own
 // draft is not a review.
 import { randomUUID } from "node:crypto";
@@ -6,11 +6,14 @@ import { z } from "zod";
 import type { db as Db } from "../db";
 import { brand_rules } from "../schema";
 import { Approval, Variant, type Brief, type Platform } from "../schemas";
-import { CREATIVE_SYSTEM, GATE_SYSTEM, TONES, creativePrompt, gatePrompt } from "./prompts/creative";
+import { CREATIVE_SYSTEM, GATE_SYSTEM, TREATMENTS, creativePrompt, gatePrompt } from "./prompts/creative";
 import { runAgent } from "./run";
 
-/** id is minted here and the platform is the caller's call, so neither is the model's to set. */
-const VariantDraft = Variant.omit({ id: true, platform: true });
+/**
+ * id is minted here, the platform is the caller's call and the treatment is the
+ * fan-out's, so none of the three is the model's to set.
+ */
+const VariantDraft = Variant.omit({ id: true, platform: true, treatment: true });
 
 const GateCall = z.object({
   violations: Approval.shape.violations,
@@ -25,18 +28,18 @@ export async function draft(
   }: { brief: Brief; platform: Platform; campaign_id?: string | null },
 ): Promise<Variant[]> {
   return Promise.all(
-    TONES.map(async (tone) => {
+    TREATMENTS.map(async (treatment) => {
       const out = await runAgent({
         db,
-        // The tone is in the agent name so a trace shows which draft failed.
-        agent: `creative:${tone.id}`,
+        // The treatment is in the agent name so a trace shows which draft failed.
+        agent: `creative:${treatment.id}`,
         task: "drafting",
         campaign_id,
         system: CREATIVE_SYSTEM,
-        prompt: creativePrompt(brief, platform, tone.instruction),
+        prompt: creativePrompt(brief, platform, treatment.instruction),
         schema: VariantDraft,
       });
-      return Variant.parse({ ...out, id: randomUUID(), platform });
+      return Variant.parse({ ...out, id: randomUUID(), platform, treatment: treatment.id });
     }),
   );
 }

@@ -72,6 +72,7 @@ const draft = {
   headline: "On feet, on the street",
   audience: "Sneaker buyers who distrust unboxings",
   angle: "Show the shoe being worn, not displayed",
+  format: "TikTok, 30-45s, vertical",
   key_messages: ["Wear test coming from the creator", "No packaging talk"],
   brand_rules_applied: ["r2", "r9-not-real"],
   // signal_ids is not in the model's schema; if it sends one it must not survive.
