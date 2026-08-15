@@ -32,6 +32,18 @@ Then `pnpm dev`.
   what makes `pnpm eval` comparable across providers, and it keeps real user
   content off free tiers that may train on it. It is also narrower than real
   comment data: six topics, no other languages, no spam.
+- **The clustering thresholds are tuned to one embedding model.**
+  `ANALYST_SIMILARITY_THRESHOLD` and `NEAR_DUPLICATE_THRESHOLD` (0.70 / 0.90, the
+  defaults in `lib/agents/analyst.ts`, mirrored in `.env.example` as the override)
+  were measured against this corpus with `nomic-embed-text`. They
+  are not portable: at 0.75 nothing but a decorated copy of the same sentence
+  falls inside the cut-off, so the densest neighbourhood is whichever line got
+  sampled most often and the signal comes out about the video rather than about
+  the product. Changing `EMBEDDING_PROVIDER` means measuring them again.
+- **The trace view refreshes the whole page.** Each stream frame triggers a
+  `router.refresh()`, because `agent_events` is server-rendered and the stream
+  only carries `CampaignState`. Fine for one reviewer; a second SSE channel for
+  events is the fix if it ever needs more.
 - **`pnpm embed` re-embeds nothing, but also detects nothing.** It only fills
   rows where `embedding IS NULL`, so editing a comment's text leaves a stale
   vector behind. Null the column to force a refresh.

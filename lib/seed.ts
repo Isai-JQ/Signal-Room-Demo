@@ -38,6 +38,14 @@ const uuid = (r: () => number) =>
  * with zero tokens in common: keyword grouping can't merge them, embeddings
  * can. That gap is the whole point of the demo, so seed.test.ts pins it.
  * Rephrasings of one canonical sentence would prove nothing.
+ *
+ * `on_feet` and `price` carry about twice the phrasings of the other groups, and
+ * that is deliberate. LINES is sampled uniformly, so a topic's share of the
+ * corpus is its share of the lines — with every group the same size the densest
+ * neighbourhood was always `audio`, whose vocabulary is the tightest, and the
+ * Analyst returned a signal about the recording instead of about the product.
+ * The extra lines are new wordings, not louder ones: what they add is distinct
+ * ways of asking, which is exactly what the density score counts.
  */
 export const TOPICS = {
   on_feet: [
@@ -59,6 +67,21 @@ export const TOPICS = {
     "give us a lookbook",
     "so it just sits on a shelf forever huh",
     "put them on your feet dude",
+    "mirror shot at least once",
+    "socks, shorts, proportions — evaluate please",
+    "worn, scuffed, lived in: that convinces me",
+    "shelf queens teach nobody anything",
+    "hoodie fit check next video",
+    "stand up, angle down, film",
+    "commute for a week, tell me everything",
+    "want mud, want creases, want reality",
+    "gym session or no verdict",
+    "cargos plus silhouette, that's my ask",
+    "boxed footwear proves zero",
+    "sunlight, pavement, moving legs",
+    "every angle except somebody actually wearing",
+    "beater status after summer?",
+    "dress up, dress down, roll camera",
   ],
   price: [
     "how much did that set you back",
@@ -78,6 +101,21 @@ export const TOPICS = {
     "quality justifies the number imo",
     "same money buys a flight to Lisbon",
     "any budget version out there",
+    "wallet just filed a complaint",
+    "three figures for foam? bold",
+    "student loans laughed at me",
+    "affordable? absolutely not",
+    "put it on layaway I guess",
+    "my grocery bill disagrees",
+    "premium tier pricing, mid tier build",
+    "outlet season cannot come soon enough",
+    "charging luxury numbers now huh",
+    "hard pass at checkout",
+    "sticker made me sit down",
+    "would rather fund a weekend abroad",
+    "financing sneakers is dystopian",
+    "half this figure and we talk",
+    "gift only, never my own card",
   ],
   camera_vs_real: [
     "colour looks completely different in person",

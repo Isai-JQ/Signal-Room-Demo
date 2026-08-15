@@ -80,7 +80,43 @@ export const Approval = z.object({
     .array(z.object({ rule_id: z.string().min(1), detail: z.string().min(1) }))
     .default([]),
   reviewer: z.enum(["agent", "human"]).default("agent"),
+  /** Who signed off, when `reviewer` is "human". Null for the agent gate. */
+  reviewed_by: z.string().min(1).nullable().default(null),
+  /** Why, in their words. Required for `edit` and `reject`, optional to approve. */
+  reason: z.string().min(1).nullable().default(null),
+  /**
+   * The gate verdict this human approval went against, when they approved a
+   * variant the gate had blocked. Null on a plain approve, so an override is
+   * never mistaken for one — the UI paints it differently and the audit trail
+   * says which verdict was overruled, not just that something was.
+   */
+  overrode: z.enum(["rejected", "needs_human"]).nullable().default(null),
 });
+
+/**
+ * What a human sends to the approve endpoint. The variant is named explicitly:
+ * the gate approves all three, a person picks one, and only that one ships.
+ *
+ * ponytail: `reviewed_by` is claimed, not proven — there is no auth in the demo.
+ * It becomes the session's user the moment there is one.
+ */
+export const HumanDecision = z
+  .object({
+    action: z.enum(["approve", "edit", "reject"]),
+    variant_id: z.string().min(1),
+    reviewed_by: z.string().min(1),
+    reason: z.string().min(1).optional(),
+    /** `edit` only: the fields a human may rewrite before it ships. */
+    edits: Variant.pick({ hooks: true, body: true, hashtags: true }).partial().optional(),
+  })
+  .refine((d) => d.action === "approve" || Boolean(d.reason), {
+    message: "reason is required to edit or reject",
+    path: ["reason"],
+  })
+  .refine((d) => d.action !== "edit" || Object.keys(d.edits ?? {}).length > 0, {
+    message: "edit needs at least one changed field",
+    path: ["edits"],
+  });
 
 export const Schedule = z.object({
   variant_id: z.string().min(1),
@@ -123,6 +159,17 @@ export const CampaignState = z.object({
   error: z.string().nullable().default(null),
 });
 
+/**
+ * One SSE frame: a transition, carrying the whole state rather than a patch.
+ * The client never merges — it replaces — so a frame lost to a dropped
+ * connection costs nothing once the next one lands.
+ */
+export const StreamEvent = z.object({
+  status: CampaignStatus,
+  state: CampaignState,
+  error: z.string().optional(),
+});
+
 export type Platform = z.infer<typeof Platform>;
 export type Comment = z.infer<typeof Comment>;
 export type Signal = z.infer<typeof Signal>;
@@ -130,6 +177,8 @@ export type Brief = z.infer<typeof Brief>;
 export type Treatment = z.infer<typeof Treatment>;
 export type Variant = z.infer<typeof Variant>;
 export type Approval = z.infer<typeof Approval>;
+export type HumanDecision = z.infer<typeof HumanDecision>;
 export type Schedule = z.infer<typeof Schedule>;
 export type CampaignStatus = z.infer<typeof CampaignStatus>;
 export type CampaignState = z.infer<typeof CampaignState>;
+export type StreamEvent = z.infer<typeof StreamEvent>;

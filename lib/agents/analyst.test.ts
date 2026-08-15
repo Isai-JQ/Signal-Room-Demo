@@ -36,6 +36,14 @@ const DIMS = 12;
 const axis = (i: number, ...lean: [number, number][]) =>
   Array.from({ length: DIMS }, (_, k) => (k === i ? 1 : (lean.find(([d]) => d === k)?.[1] ?? 0)));
 
+/**
+ * This fixture leans members 0.35-0.45 off their anchor, which reads as
+ * "differently worded" at 0.95 and as "the same sentence twice" at the 0.90 the
+ * corpus is tuned to. Its geometry is the subject of the tests that use it, so
+ * they pass the threshold they were drawn for rather than inherit the default.
+ */
+const FIXTURE_NEAR_DUPLICATE = 0.95;
+
 // Two directions far apart, plus differently-worded members of each. Group A is
 // bigger, so group A wins regardless of which comment the scan seeds from.
 const corpus: Embedded[] = [
@@ -63,7 +71,7 @@ const corpus: Embedded[] = [
 ];
 
 test("densest cluster wins, and comes back closest-first", () => {
-  const picked = densestCluster(corpus, 0.9, 3);
+  const picked = densestCluster(corpus, 0.9, 3, FIXTURE_NEAR_DUPLICATE);
   assert.deepEqual(
     picked.map((c) => c.id),
     ["a1", "a2", "a3"],
@@ -92,7 +100,7 @@ test("eleven near-duplicates lose to eight distinct wordings", () => {
     11,
     "without the dampener the eleven copies are simply the bigger neighbourhood",
   );
-  const picked = densestCluster([...copies, ...distinct], 0.9, 30);
+  const picked = densestCluster([...copies, ...distinct], 0.9, 30, FIXTURE_NEAR_DUPLICATE);
   assert.deepEqual(
     picked.map((c) => c.id).sort(),
     distinct.map((c) => c.id).sort(),
@@ -100,9 +108,69 @@ test("eleven near-duplicates lose to eight distinct wordings", () => {
   );
 });
 
+/**
+ * The default dampener, on the geometry it was tuned for. No fourth argument
+ * anywhere in here on purpose: this is what a clean clone runs, and it is the
+ * behaviour 0.90 was bought for — a decorated copy stops voting twice, while six
+ * genuinely different ways of asking for the same thing keep voting separately.
+ * At 0.95 the copies would vote eleven times and the meta topic would win; below
+ * about 0.75 the paraphrases would collapse into one and the signal would come
+ * down to whichever sentence got sampled most.
+ */
+test("genuine paraphrases still count one by one at the default dampener", () => {
+  // One request, six vocabularies, each leaning off the anchor on its own axis:
+  // 0.86 similar to the anchor, 0.74 to each other. Inside a 0.70 theme, outside
+  // a 0.90 duplicate — which is the entire band the corpus lives in.
+  const paraphrases: Embedded[] = [
+    "on-feet pics?",
+    "an unworn shoe tells me nothing",
+    "we want outfits, not packaging",
+    "take those outside",
+    "lace em up already",
+    "every angle except somebody actually wearing",
+  ].map((text, i) => ({
+    id: `say-${i}`,
+    text,
+    platform: "tiktok" as const,
+    embedding: i === 0 ? axis(0) : axis(0, [2 + i, 0.6]),
+  }));
+
+  // The other topic, said once and posted ten times with the punctuation moved:
+  // 0.999 to each other, so the dampener leaves it one vote.
+  const copies: Embedded[] = Array.from({ length: 10 }, (_, i) => ({
+    id: `dup-${i}`,
+    text: "part 2 when",
+    platform: "x" as const,
+    embedding: axis(1, [9, i * 0.002]),
+  }));
+
+  // Copies first, and that order is load-bearing. A dampener aggressive enough
+  // to collapse the paraphrases collapses every neighbourhood to one vote, and
+  // ties go to whichever was scanned first — so with the paraphrases in front
+  // this test would pass on a collapse instead of catching it.
+  const rows = [...copies, ...paraphrases];
+  const ids = (rows: Embedded[]) => rows.map((r) => r.id).sort();
+
+  assert.deepEqual(
+    ids(densestCluster(rows, 0.7, 30, 1)),
+    ids(copies),
+    "with the dampener off, ten copies are simply the bigger neighbourhood",
+  );
+  assert.deepEqual(
+    ids(densestCluster(rows, 0.7, 30)),
+    ids(paraphrases),
+    "at the default, six wordings of one request outweigh ten copies of another",
+  );
+});
+
 test("invented evidence ids are dropped and confidence falls to low", async () => {
   process.env.LLM_PROVIDER = "groq";
   process.env.GROQ_API_KEY = "test-key";
+  // analyze() reads the dampener from the environment, so this is the only way
+  // to hand it the value `corpus` was drawn for. Put back afterwards: the tests
+  // below this one are meant to run on the real default.
+  const priorNear = process.env.NEAR_DUPLICATE_THRESHOLD;
+  process.env.NEAR_DUPLICATE_THRESHOLD = String(FIXTURE_NEAR_DUPLICATE);
   const restore = stubFetch(async () =>
     okBody(
       JSON.stringify({
@@ -134,6 +202,9 @@ test("invented evidence ids are dropped and confidence falls to low", async () =
     assert.equal(events[0]?.schema_honored, true);
   } finally {
     restore();
+    // Assigning undefined would leave the string "undefined" behind.
+    if (priorNear === undefined) delete process.env.NEAR_DUPLICATE_THRESHOLD;
+    else process.env.NEAR_DUPLICATE_THRESHOLD = priorNear;
   }
 });
 

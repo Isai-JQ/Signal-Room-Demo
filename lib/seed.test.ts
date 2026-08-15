@@ -7,7 +7,7 @@ const digest = (rows: unknown) => createHash("sha256").update(JSON.stringify(row
 
 // Pinned so drift is caught across processes too, not just within one run.
 // Changing the corpus on purpose means updating this line in the same commit.
-const EXPECTED = "47d844be81a4f3339b72a5d6c04774a780f3e0510b128ca8bfdb5b070ee1e478";
+const EXPECTED = "26705c0a268cfd5af0060b72652b2619187483bc690b2742a51e271f55d2e48b";
 
 test("the seed corpus is identical on every run", () => {
   const rows = generateComments();
@@ -23,12 +23,18 @@ test("the seed corpus is identical on every run", () => {
 test("each topic says one thing in many vocabularies", () => {
   const words = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9']+/g));
   for (const [topic, lines] of Object.entries(TOPICS)) {
-    assert.ok(lines.length >= 15 && lines.length <= 20, `${topic}: ${lines.length} lines`);
+    // Upper bound is only a smell test for copy-paste. on_feet and price are
+    // twice the size of the rest on purpose — see the note on TOPICS.
+    assert.ok(lines.length >= 15 && lines.length <= 40, `${topic}: ${lines.length} lines`);
     assert.equal(new Set(lines).size, lines.length, `${topic} repeats a line`);
     const pairs = lines.flatMap((a, i) => lines.slice(i + 1).map((b) => [words(a), words(b)] as const));
     const disjoint = pairs.filter(([a, b]) => ![...a].some((w) => b.has(w))).length;
     assert.ok(disjoint / pairs.length > 0.7, `${topic}: only ${disjoint}/${pairs.length} pairs are word-disjoint`);
   }
+  // What the audience wants from the product has to be able to outvote what it
+  // thinks of the microphone — the density score counts distinct wordings, so
+  // the group with more of them wins, and briefs stop coming out about audio.
+  assert.ok(Math.min(TOPICS.on_feet.length, TOPICS.price.length) > TOPICS.audio.length);
 });
 
 test("the brand rules are 12 distinct non-empty rules", () => {

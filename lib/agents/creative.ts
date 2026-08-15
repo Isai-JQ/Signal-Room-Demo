@@ -61,7 +61,7 @@ export async function gate(
   if (rules.length === 0) throw new Error("no brand rules — run `pnpm seed` first");
   const severity = new Map(rules.map((r) => [r.id, r.severity]));
 
-  return Promise.all(
+  const approvals = await Promise.all(
     variants.map(async (variant) => {
       const out = await runAgent({
         db,
@@ -86,4 +86,15 @@ export async function gate(
       return Approval.parse({ variant_id: variant.id, verdict, violations, reviewer: "agent" });
     }),
   );
+
+  // One verdict per variant, each carrying its own id. A shared or missing id
+  // would show the wrong variant's violations next to the copy a human is about
+  // to approve, and nothing downstream would notice.
+  const ids = new Set(approvals.map((a) => a.variant_id));
+  if (approvals.length !== variants.length || ids.size !== variants.length) {
+    throw new Error(
+      `gate returned ${approvals.length} verdicts over ${ids.size} distinct variant ids for ${variants.length} variants`,
+    );
+  }
+  return approvals;
 }

@@ -16,10 +16,14 @@ import { runAgent } from "./run";
  */
 const AnalystSignal = Signal.omit({ id: true, volume: true, platforms: true });
 
+// Both defaults were measured against the seed corpus with nomic-embed-text, not
+// picked in theory. A clean clone has no .env.local, so these are what it runs:
+// at 0.75 nothing but a decorated copy of one sentence lands inside the cut-off
+// and the signal comes out about the video instead of the product.
 /** Cosine cut-off for "same theme". Tune it against the corpus, not in theory. */
-const envThreshold = () => Number(process.env.ANALYST_SIMILARITY_THRESHOLD ?? 0.75);
+const envThreshold = () => Number(process.env.ANALYST_SIMILARITY_THRESHOLD ?? 0.7);
 /** Above this, two comments are one sentence wearing different punctuation. */
-const envNearDuplicate = () => Number(process.env.NEAR_DUPLICATE_THRESHOLD ?? 0.95);
+const envNearDuplicate = () => Number(process.env.NEAR_DUPLICATE_THRESHOLD ?? 0.9);
 const REPRESENTATIVES = 30;
 
 export type Embedded = { id: string; text: string; platform: Platform; embedding: number[] };
