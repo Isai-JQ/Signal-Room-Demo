@@ -6,13 +6,11 @@
 // finished long ago) the campaigns row still has the last state, which is sent
 // as a single event instead.
 import { db } from "@/lib/db";
+import { isTerminal } from "@/lib/live";
 import { load, PipelineError, subscribe, type Transition } from "@/lib/pipeline";
-import type { CampaignStatus } from "@/lib/schemas";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const DONE = new Set<CampaignStatus>(["scheduled", "rejected", "needs_human"]);
 
 /**
  * Where the client got to before the connection dropped, as an index into the
@@ -67,11 +65,11 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         seq++;
         // Already seen before the connection dropped. Terminal still closes:
         // there is nothing after it to keep the socket open for.
-        if (seq <= cursor) return void (DONE.has(t.status) && close());
+        if (seq <= cursor) return void (isTerminal(t.status) && close());
         write(`id: ${seq}\nevent: ${t.status}\ndata: ${JSON.stringify(t)}\n\n`);
         // awaiting_approval is a rest, not an end: the approve call resumes the
         // same feed, so the stream stays open through to `scheduled`.
-        if (DONE.has(t.status)) close();
+        if (isTerminal(t.status)) close();
       });
 
       // Nothing in the feed at all: it outlived its log, or predates this
@@ -80,7 +78,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
       if (seq < 0) {
         const t: Transition = { status: current.status, state: current };
         write(`event: ${t.status}\ndata: ${JSON.stringify(t)}\n\n`);
-        if (DONE.has(current.status)) return close();
+        if (isTerminal(current.status)) return close();
       }
 
       // Comment frames only. Idle proxies drop a silent connection, and

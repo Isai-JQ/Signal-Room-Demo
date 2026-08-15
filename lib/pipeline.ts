@@ -13,7 +13,7 @@ import { buildBrief } from "./agents/brief";
 import { draft, gate } from "./agents/creative";
 import { scheduleVariants } from "./agents/distribution";
 import type { db as Db } from "./db";
-import { isBlocked, lastGateVerdict } from "./live";
+import { isBlocked, isTerminal, lastGateVerdict } from "./live";
 import { campaigns } from "./schema";
 import {
   Approval,
@@ -39,9 +39,6 @@ export class PipelineError extends Error {
     this.name = "PipelineError";
   }
 }
-
-/** Nothing follows these. `awaiting_approval` is a rest, not an end. */
-const TERMINAL = new Set<CampaignStatus>(["scheduled", "rejected", "needs_human"]);
 
 /**
  * Transition fan-out for the SSE route, which watches a run started by a
@@ -108,7 +105,7 @@ async function commit(
   for (const sub of feed.subs) sub(transition);
   // The log is only useful while someone might still ask for it. A minute after
   // the run ends is long enough for a client to reconnect and replay it.
-  if (TERMINAL.has(status)) setTimeout(() => feeds.delete(next.campaign_id), 60_000);
+  if (isTerminal(status)) setTimeout(() => feeds.delete(next.campaign_id), 60_000);
 
   await onTransition?.(transition);
   return next;
@@ -127,9 +124,12 @@ export async function load(db: typeof Db, campaign_id: string): Promise<Campaign
  */
 export async function create(
   db: typeof Db,
-  { onTransition }: { onTransition?: OnTransition } = {},
+  { onTransition, is_eval = false }: { onTransition?: OnTransition; is_eval?: boolean } = {},
 ): Promise<CampaignState> {
   const state = CampaignState.parse({ campaign_id: randomUUID(), status: "collecting" });
+  // Set once, here: `commit` upserts only status/state/updated_at, so the flag
+  // survives every transition without being part of the agents' contract.
+  await db.insert(campaigns).values({ id: state.campaign_id, state, is_eval }).onConflictDoNothing();
   return commit(db, state, "collecting", onTransition);
 }
 
@@ -139,8 +139,8 @@ export async function create(
  * the column the trace view filters on, and without it two overlapping runs are
  * indistinguishable.
  *
- * Returns at `rejected`, `needs_human` or `awaiting_approval`. Nothing here
- * reaches Distribution.
+ * Returns at `rejected`, `needs_human`, `failed` or `awaiting_approval`. Nothing
+ * here reaches Distribution.
  */
 export async function start(
   db: typeof Db,
@@ -179,9 +179,10 @@ export async function start(
     if (verdict !== "approved") return state;
     return await commit(db, state, "awaiting_approval", onTransition);
   } catch (err) {
-    // claude.md: a schema failure marks the campaign needs_human. Same for
-    // anything else that throws — the error goes on the state, then out.
-    await commit(db, state, "needs_human", onTransition, String(err));
+    // claude.md: a schema failure marks the campaign failed. Same for anything
+    // else that throws — the error goes on the state, then out. Not
+    // `needs_human`: nobody is being asked anything, the run died.
+    await commit(db, state, "failed", onTransition, String(err));
     throw err;
   }
 }
@@ -228,7 +229,7 @@ async function toDistribution(
     );
     return await commit(db, { ...state, schedule }, "scheduled", onTransition);
   } catch (err) {
-    await commit(db, state, "needs_human", onTransition, String(err));
+    await commit(db, state, "failed", onTransition, String(err));
     throw err;
   }
 }
@@ -307,7 +308,9 @@ export async function decide(
     // One variant in, one verdict out — gate() asserts that before it returns.
     regated = (await gate(db, [edited], { campaign_id }))[0]!;
   } catch (err) {
-    await commit(db, { ...state, approvals, variants }, "needs_human", onTransition, String(err));
+    // The re-gate threw. The human's decision is still on the record; what is
+    // not known is whether the rewrite passes, and that is a crash, not a verdict.
+    await commit(db, { ...state, approvals, variants }, "failed", onTransition, String(err));
     throw err;
   }
 

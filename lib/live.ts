@@ -13,7 +13,7 @@ export type Live = {
 };
 
 /** Nothing follows these, so a late frame after one of them is stale by definition. */
-const TERMINAL = new Set<CampaignStatus>(["scheduled", "rejected", "needs_human"]);
+const TERMINAL = new Set<CampaignStatus>(["scheduled", "rejected", "needs_human", "failed"]);
 
 /** The run is over: the client closes its EventSource instead of reconnecting forever. */
 export const isTerminal = (status: CampaignStatus): boolean => TERMINAL.has(status);
@@ -28,7 +28,10 @@ export const STATUS_TONE: Record<CampaignStatus, string> = {
   awaiting_approval: "bg-amber-100 text-amber-900",
   scheduled: "bg-emerald-600 text-white",
   rejected: "bg-rose-100 text-rose-800",
-  needs_human: "bg-rose-600 text-white",
+  needs_human: "bg-amber-300 text-amber-950",
+  // Not a verdict and not a queue: the run threw. Grey rather than red, because
+  // a red badge next to needs_human is what made the two look interchangeable.
+  failed: "bg-neutral-800 text-white",
 };
 
 export const liveFrom = (campaign: CampaignState): Live => ({

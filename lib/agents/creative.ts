@@ -2,7 +2,7 @@
 // The two halves are separate model calls on purpose — a drafter grading its own
 // draft is not a review.
 import { randomUUID } from "node:crypto";
-import { z } from "zod";
+import { z } from "zod/v4";
 import type { db as Db } from "../db";
 import { brand_rules } from "../schema";
 import { Approval, Variant, type Brief, type Platform } from "../schemas";

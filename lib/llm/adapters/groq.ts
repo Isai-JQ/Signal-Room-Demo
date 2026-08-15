@@ -13,4 +13,10 @@ export const groq = openAiCompat({
   embeddingModel: null, // Groq serves no embedding models
   embeddingDim: 0,
   supportsStructuredOutput: true,
+  // gpt-oss puts most of a completion in the reasoning channel, and the whole
+  // completion shares one token budget: a long enough think runs out of room
+  // before the JSON closes and Groq 400s with json_validate_failed. Drafting a
+  // shot list is the task that least needs the deliberation, so it is the one
+  // that gives the budget back to the answer.
+  reasoningEffort: { drafting: "low" },
 });

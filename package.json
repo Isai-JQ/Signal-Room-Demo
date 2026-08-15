@@ -9,6 +9,7 @@
     "lint": "next lint",
     "test": "node --import tsx --test lib/llm/provider.test.ts lib/schemas.test.ts lib/seed.test.ts lib/pipeline.test.ts lib/live.test.ts lib/agents/*.test.ts",
     "pipeline": "node --import tsx scripts/run-pipeline.ts",
+    "eval": "node --import tsx scripts/eval.ts",
     "seed": "node --import tsx lib/seed.ts",
     "embed": "node --import tsx lib/embed.ts",
     "db:generate": "drizzle-kit generate",
@@ -20,8 +21,7 @@
     "pg": "^8.13.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "zod": "^3.24.0",
-    "zod-to-json-schema": "^3.25.2"
+    "zod": "^3.24.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.0.0",

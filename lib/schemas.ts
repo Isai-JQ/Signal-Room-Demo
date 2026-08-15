@@ -3,7 +3,7 @@
 //
 // Everything here is JSON-primitive: CampaignState is stored as jsonb and comes
 // back out of Postgres as plain JSON, so timestamps are ISO strings, not Date.
-import { z } from "zod";
+import { z } from "zod/v4";
 
 // Where a creator actually posts an unboxing. `platform` is a text column, not a
 // pg enum, so this list is the only gate — nothing to migrate when it changes.
@@ -132,6 +132,11 @@ export const Schedule = z.object({
  * The three verdict statuses are the gate's, verbatim: `rejected` and
  * `needs_human` are terminal, `approved` means the agent gate passed and the
  * campaign moves straight on to `awaiting_approval`, where it waits for a human.
+ *
+ * `failed` is not one of them. It is the only status no agent votes for: the run
+ * threw. Keeping it apart from `needs_human` is the point — one is a decision
+ * waiting on a person, the other is a crash waiting on nobody, and a list that
+ * paints them the same sends someone to review a stack trace.
  */
 export const CampaignStatus = z.enum([
   "collecting",
@@ -143,6 +148,7 @@ export const CampaignStatus = z.enum([
   "awaiting_approval",
   "scheduled",
   "needs_human",
+  "failed",
 ]);
 
 /** The only thing agents pass each other (claude.md). Never free text. */
@@ -155,7 +161,7 @@ export const CampaignState = z.object({
   variants: z.array(Variant).default([]),
   approvals: z.array(Approval).default([]),
   schedule: z.array(Schedule).default([]),
-  /** Set only alongside `needs_human`: what threw, so the trace view has it without a join. */
+  /** Set only alongside `failed`: what threw, so the trace view has it without a join. */
   error: z.string().nullable().default(null),
 });
 

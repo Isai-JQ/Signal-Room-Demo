@@ -48,6 +48,7 @@ export const gemini: Adapter = {
   async complete({ model, system, prompt, jsonSchema }) {
     const res = await request<{
       candidates?: { content?: { parts?: { text?: string }[] } }[];
+      usageMetadata?: { totalTokenCount?: number };
     }>(`${BASE}/models/${model}:generateContent`, {
       method: "POST",
       headers: headers(),
@@ -61,9 +62,10 @@ export const gemini: Adapter = {
         },
       }),
     });
-    return (
-      res.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? ""
-    );
+    return {
+      text: res.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "",
+      tokens: res.usageMetadata?.totalTokenCount ?? null,
+    };
   },
 
   async embed({ model, texts }) {

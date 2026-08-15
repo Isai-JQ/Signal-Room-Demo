@@ -32,7 +32,7 @@ prose: the only thing that moves through the pipeline is a `CampaignState`
 to `campaigns.state` before it is announced. Every model output is validated
 against its own Zod schema too — one repair round-trip with the validation
 errors injected into the prompt, and if that fails the campaign is marked
-`needs_human` rather than allowed to continue on a half-parsed object.
+`failed` rather than allowed to continue on a half-parsed object.
 
 **Analyst** (`lib/agents/analyst.ts`) reads embedded comments out of Postgres and
 clusters them in code, not in the model. For every comment it collects the others
@@ -77,8 +77,12 @@ by hour of day, and takes the peak — arithmetic, in code. The model writes one
 thing: the `rationale` sentence that explains the hour it was handed.
 
 Status walks `collecting → signals → brief → variants → approved →
-awaiting_approval → scheduled`, with `rejected` and `needs_human` as the other
-two ends. Every transition is one SSE frame carrying the whole state.
+awaiting_approval → scheduled`, with `rejected` and `needs_human` as the gate's
+other two ends and `failed` as the one no agent votes for: the run threw. That
+last distinction is deliberate — `needs_human` is a decision waiting on a person,
+`failed` is a crash waiting on nobody, and the campaign list paints them
+differently so a stack trace never lands in someone's review queue. Every
+transition is one SSE frame carrying the whole state.
 
 ### A real run
 
@@ -152,8 +156,9 @@ that threw is the most interesting row on the page, so nothing is filtered out o
 the trace view. The columns (`lib/schema.ts`): `campaign_id` (nullable), `agent`,
 `task`, `provider`, `model`, `structured_mode`, `transport_attempts`,
 `repair_attempts`, `schema_honored`, `input_hash`, `output`, `tokens`,
-`latency_ms`, `error`, `ts`. `campaign_id` is what the view filters on; without
-it you are searching by time range, which breaks the moment two runs overlap.
+`latency_ms`, `error_code`, `error`, `ts`. `campaign_id` is what the view filters
+on; without it you are searching by time range, which breaks the moment two runs
+overlap.
 
 The run above, as the trace shows it — nine rows for one campaign, three of them
 the parallel creative fan-out and three the per-variant gate:
@@ -178,6 +183,18 @@ support one and the schema was injected into the prompt instead. `native` with a
 low honored rate is the interesting failure: the provider accepts the schema and
 then ignores it.
 
+`schema_honored` is three-valued, because "the model got it wrong" and "there was
+nothing to get wrong" are different facts. `true` is an output that validated
+first time, `false` an output that existed and failed Zod twice, and **`null` a
+run that never produced an output to judge** — the provider abandoned its own
+generation, or the call never came back. Only the first two are evidence about
+the model, so the honored rate is computed over the non-null rows; counting a
+provider's aborted generation as a miss blames the model for the provider's token
+budget. `error_code` says which kind of failure it was without anyone parsing
+prose: the provider's own code when it sends one (`json_validate_failed`),
+`http_<status>` when it does not, `schema_validation_failed` for a Zod failure,
+and the error's name for anything else. The full text stays in `error`.
+
 The two retry counters are deliberately separate because they blame different
 things. `transport_attempts` counts extra calls caused by 429 and 5xx retries — a
 provider capacity problem that says nothing about the model. `repair_attempts`
@@ -196,7 +213,7 @@ no agent changes.
 
 | Provider | Generation | Embeddings | Notes |
 |---|---|---|---|
-| `groq` | `openai/gpt-oss-120b` (reasoning, extraction), `openai/gpt-oss-20b` (drafting) | none — the adapter declares no embedding model | Default for `LLM_PROVIDER`. Free tier, no card. Native structured output; rate limits are org-wide. |
+| `groq` | `openai/gpt-oss-120b` (reasoning, extraction), `openai/gpt-oss-20b` (drafting) | none — the adapter declares no embedding model | Default for `LLM_PROVIDER`. Free tier, no card. Native structured output; rate limits are org-wide. Drafting calls send `reasoning_effort: "low"` — see Known limitations. |
 | `gemini` | `gemini-2.5-pro` (reasoning), `gemini-2.5-flash` (extraction, drafting) | `text-embedding-004`, 768 dims | Free tier, no card. Data may be used for training. Native structured output, via an allowlisted OpenAPI subset of the JSON Schema. |
 | `ollama` | `qwen2.5:7b-instruct` (all three tasks) | `nomic-embed-text`, 768 dims | Default for `EMBEDDING_PROVIDER`. Local, no limits, no cost, data never leaves the machine. |
 
@@ -259,7 +276,7 @@ lib/
   llm/                     provider.ts (complete/embed), http.ts (retry, limiter)
   llm/adapters/            groq, gemini, ollama — one file each
 db/init.sql                CREATE EXTENSION vector, on first boot of the volume
-scripts/                   run-pipeline.ts, run-analyst.ts
+scripts/                   run-pipeline.ts, eval.ts
 ```
 
 ## Known limitations
@@ -296,9 +313,51 @@ scripts/                   run-pipeline.ts, run-analyst.ts
   campaign as whatever the last write happened to contain — and nothing outside
   the campaign can query "every override this month". The audit trail wants its
   own append-only table with a foreign key, not a field on a mutable row.
-- **`pnpm eval` does not exist.** `claude.md` documents it, and the argument for
-  keeping the corpus fixed and for splitting `structured_mode` from
-  `schema_honored` rests on it reporting the honored rate per provider and model.
-  There is no such script in `package.json`. The trace shows those columns per
-  run, but the aggregate metric — the one that tells you whether a provider's
-  native structured output actually works — is currently unmeasured.
+- **`openai/gpt-oss-20b` spends most of a completion thinking.** In the runs
+  measured here, 85-90% of the completion tokens went to the reasoning channel
+  and only the remainder to the JSON. Both share one budget, so a long enough
+  deliberation runs out of room before the document closes and Groq answers 400
+  `json_validate_failed` — a failure that says nothing about whether the model can
+  follow a schema. `reasoning_effort: "low"` on `drafting` (`lib/llm/adapters/groq.ts`)
+  buys the answer most of that budget back; it mitigates the ceiling rather than
+  removing it, and a long enough brief can still hit it. The 400 is deliberately
+  not retried: `json_validate_failed` from a budget overrun is transient, but
+  retrying 400s as a class is a door worth measuring before opening.
+- **Reasoning tokens count against the org's TPM.** On the free tier that is 8,000
+  tokens per minute for the whole organisation, and the invisible reasoning
+  channel spends against it like any other token — so the 429 arrives far earlier
+  than the size of the visible output suggests. That one *is* retried, with the
+  1s/2s/4s backoff.
+- **`pnpm eval` measures one provider per invocation.** It runs the pipeline `N`
+  times (`--runs`, default 3) against whatever `LLM_PROVIDER` is set to, then
+  aggregates `agent_events` by provider and model: the `schema_honored` rate over
+  the rows it could judge, the unjudged count beside it rather than inside it, the
+  `error_code` breakdown, `transport_attempts` and `repair_attempts` separately,
+  and p50/p95 for `tokens` and `latency_ms`.
+
+  Comparing providers is two runs and a diff, not one command:
+
+  ```bash
+  LLM_PROVIDER=groq   pnpm eval --json > groq.json
+  LLM_PROVIDER=gemini pnpm eval --json > gemini.json
+  diff <(jq .models groq.json) <(jq .models gemini.json)
+  ```
+
+  Firing all three at once would spend the whole org TPM budget on the
+  measurement — which is the very thing `transport_attempts` is there to show.
+  The corpus is fixed and the runs are sequential so the two files are comparable.
+
+  `--delay` (seconds, default 60) is the pause between runs, and on the free tier
+  it is the difference between measuring the model and measuring the rate
+  limiter. Three back-to-back runs cost 11 transport retries and lost one run to
+  a 429; at `--delay 20` it was still 10 retries and one lost run, because 8,000
+  TPM is roughly one run and a partial window does not clear it. At 60 — a full
+  window — the same three runs cost 1 retry and lost nothing. Use `--delay 0` on
+  a paid tier.
+
+  The eval's campaigns are real rows with `campaigns.is_eval = true`, so the
+  campaign list hides them; `/?eval=1` shows them, badged. That flag also settles
+  a stale claim in `claude.md`: the column `agent_events.campaign_id` is *not*
+  nullable because the eval writes campaign-less events. It doesn't — every
+  pipeline run mints a campaign, and the eval scopes its aggregate to the ones it
+  just created. Nothing currently writes a null to that column at all.

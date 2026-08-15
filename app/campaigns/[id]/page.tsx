@@ -10,7 +10,7 @@ import { asc, eq } from "drizzle-orm";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Fragment } from "react";
-import { z } from "zod";
+import { z } from "zod/v4";
 import { db } from "@/lib/db";
 import { agent_events, campaigns } from "@/lib/schema";
 import { CampaignState } from "@/lib/schemas";
@@ -70,8 +70,18 @@ export default async function CampaignPage({ params }: { params: Promise<{ id: s
                   <td className="px-2 py-1.5">{e.provider}</td>
                   <td className="px-2 py-1.5 font-mono">{e.model}</td>
                   <td className="px-2 py-1.5">{e.structured_mode}</td>
-                  <td className={`px-2 py-1.5 ${e.schema_honored ? "text-emerald-700" : "text-rose-700"}`}>
-                    {String(e.schema_honored)}
+                  {/* null is not a failure: nothing came back to judge. Painting
+                      it red would be the same conflation the column exists to undo. */}
+                  <td
+                    className={`px-2 py-1.5 ${
+                      e.schema_honored === null
+                        ? "text-neutral-400"
+                        : e.schema_honored
+                          ? "text-emerald-700"
+                          : "text-rose-700"
+                    }`}
+                  >
+                    {e.schema_honored === null ? "—" : String(e.schema_honored)}
                   </td>
                   <td className="px-2 py-1.5 tabular-nums">{e.transport_attempts}</td>
                   <td className="px-2 py-1.5 tabular-nums">{e.repair_attempts}</td>
@@ -80,7 +90,7 @@ export default async function CampaignPage({ params }: { params: Promise<{ id: s
                 {e.error && (
                   <tr className="bg-rose-50">
                     <td colSpan={9} className="px-2 pb-2 font-mono text-rose-800">
-                      {e.error}
+                      <strong>{e.error_code}</strong> {e.error}
                     </td>
                   </tr>
                 )}

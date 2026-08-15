@@ -3,8 +3,11 @@
 
 export type Task = "reasoning" | "extraction" | "drafting";
 
-/** What zod-to-json-schema hands back. Opaque here — adapters just forward it. */
+/** What `z.toJSONSchema` hands back. Opaque here — adapters just forward it. */
 export type JsonSchema = Record<string, unknown>;
+
+/** One completion. `tokens` is null for a provider that reports no usage. */
+export type CompletionResult = { text: string; tokens: number | null };
 
 export type Adapter = {
   readonly name: string;
@@ -17,11 +20,13 @@ export type Adapter = {
   readonly supportsStructuredOutput: boolean;
   complete(args: {
     model: string;
+    /** The semantic task, so an adapter can tune per task without naming agents. */
+    task: Task;
     system: string;
     prompt: string;
     /** Only passed when supportsStructuredOutput is true. */
     jsonSchema?: JsonSchema;
-  }): Promise<string>;
+  }): Promise<CompletionResult>;
   embed(args: { model: string; texts: string[] }): Promise<number[][]>;
 };
 

@@ -1,12 +1,13 @@
 // The only way an agent reaches a model. claude.md: every agent run writes a row
 // to agent_events, failed attempts included.
 import { createHash } from "node:crypto";
-import type { z } from "zod";
+import type { z } from "zod/v4";
 import type { db as Db } from "../db";
 import {
   SchemaValidationError,
   adapterFor,
   complete,
+  failureCode,
   llmProvider,
   modelFor,
   type Task,
@@ -50,6 +51,7 @@ export async function runAgent<T>({
       repair_attempts: out.repair_attempts,
       schema_honored: out.schema_honored,
       output: out.data,
+      tokens: out.tokens,
       latency_ms: Date.now() - started,
     });
     return out.data;
@@ -57,12 +59,19 @@ export async function runAgent<T>({
     // ponytail: complete() throws instead of handing back its counters, so a
     // failed run logs what can be inferred — transport_attempts stays 0. Carry
     // the counters on the error if the eval ever needs them exact for failures.
+    //
+    // Only a schema failure is evidence about the model: there was an output and
+    // it did not validate, twice. Anything else — a provider that abandoned its
+    // own generation, a socket that died — never produced an output to judge, so
+    // schema_honored is null rather than a false the eval would count.
+    const schemaFailed = err instanceof SchemaValidationError;
     await db.insert(agent_events).values({
       ...base,
       structured_mode: adapterFor(provider).supportsStructuredOutput ? "native" : "fallback",
-      repair_attempts: err instanceof SchemaValidationError ? 1 : 0,
-      schema_honored: false,
+      repair_attempts: schemaFailed ? 1 : 0,
+      schema_honored: schemaFailed ? false : null,
       latency_ms: Date.now() - started,
+      error_code: failureCode(err),
       error: String(err),
     });
     throw err;

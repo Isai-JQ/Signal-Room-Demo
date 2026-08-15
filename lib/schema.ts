@@ -55,6 +55,9 @@ export const campaigns = pgTable(
     // have to unpack the jsonb. CampaignState.status stays authoritative.
     status: text("status").$type<CampaignStatus>().notNull().default("collecting"),
     state: jsonb("state").$type<CampaignState>().notNull(),
+    // `pnpm eval` runs the real pipeline, so its campaigns are real rows. They
+    // are still measurement, not demo: the list hides them unless asked.
+    is_eval: boolean("is_eval").notNull().default(false),
     created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updated_at: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -76,15 +79,26 @@ export const agent_events = pgTable(
     transport_attempts: integer("transport_attempts").notNull().default(0),
     /** Extra calls from Zod repair round-trips. 0 or 1. */
     repair_attempts: integer("repair_attempts").notNull().default(0),
-    /** repair_attempts === 0. Independent of transport_attempts on purpose. */
-    schema_honored: boolean("schema_honored").notNull(),
+    /**
+     * Whether the model satisfied its schema first time (`repair_attempts === 0`),
+     * independent of transport_attempts on purpose.
+     *
+     * Null when there was never an output to judge: the provider aborted its own
+     * generation, or the call never came back. False is reserved for output that
+     * existed and failed Zod — folding the two together makes a provider's 400
+     * look like a model that ignores schemas.
+     */
+    schema_honored: boolean("schema_honored"),
     input_hash: text("input_hash").notNull(),
     output: jsonb("output"),
     tokens: integer("tokens"),
     latency_ms: integer("latency_ms").notNull(),
+    /** Short cause, machine-groupable: `json_validate_failed`, `http_500`, `schema_validation_failed`. */
+    error_code: text("error_code"),
     error: text("error"),
     ts: timestamp("ts", { withTimezone: true }).defaultNow().notNull(),
   },
-  // `pnpm eval` aggregates the schema_honored rate by provider and model.
+  // `pnpm eval` aggregates the schema_honored rate by provider and model, over
+  // the non-null rows only.
   (t) => [index("agent_events_provider_model_idx").on(t.provider, t.model)],
 );

@@ -1,6 +1,5 @@
-import type { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
-import { withLimit, withRetry, type Adapter, type JsonSchema, type Task } from "./http";
+import { z } from "zod/v4";
+import { HttpError, withLimit, withRetry, type Adapter, type JsonSchema, type Task } from "./http";
 import { gemini } from "./adapters/gemini";
 import { groq } from "./adapters/groq";
 import { ollama } from "./adapters/ollama";
@@ -8,7 +7,9 @@ import { ollama } from "./adapters/ollama";
 export type { Task } from "./http";
 
 // Adding a provider = one adapter + one line here. No agent changes.
-const adapters = { groq, gemini, ollama } satisfies Record<string, Adapter>;
+// ponytail: exported so a test can register a stub adapter. Nothing in the app
+// writes to it; make it a real registry with a `register()` if that changes.
+export const adapters = { groq, gemini, ollama } satisfies Record<string, Adapter>;
 export type ProviderName = keyof typeof adapters;
 
 export function adapterFor(name: string): Adapter {
@@ -28,17 +29,34 @@ export const embeddingProvider = () => process.env.EMBEDDING_PROVIDER ?? "ollama
 export const modelFor = (task: Task, provider = llmProvider()) =>
   adapterFor(provider).models[task];
 
-/** Thrown when the model failed its schema twice — caller marks needs_human. */
+/** Thrown when the model failed its schema twice — caller marks the campaign failed. */
 export class SchemaValidationError extends Error {
-  constructor(
-    message: string,
-    readonly provider: string,
-    readonly model: string,
-    readonly raw: string,
-  ) {
+  constructor(message: string) {
     super(message);
     this.name = "SchemaValidationError";
   }
+}
+
+/**
+ * A short, groupable cause for `agent_events.error_code`, so the trace can tell
+ * "the provider abandoned its own generation" from "the model ignored the
+ * schema" without anyone reading prose. The provider's own code wins when it
+ * sends one — `json_validate_failed` is the interesting one here, because it is
+ * a 400 that says nothing about whether the model can follow a schema.
+ */
+export function failureCode(err: unknown): string {
+  if (err instanceof SchemaValidationError) return "schema_validation_failed";
+  if (err instanceof HttpError) {
+    let code: unknown;
+    try {
+      code = (JSON.parse(err.body) as { error?: { code?: unknown; status?: unknown } })?.error
+        ?.code;
+    } catch {
+      // Not every provider errors in JSON; the status is still a cause.
+    }
+    return typeof code === "string" && code ? code : `http_${err.status}`;
+  }
+  return err instanceof Error && err.name ? err.name : "unknown";
 }
 
 const JSON_RULES =
@@ -59,8 +77,17 @@ export type Completion<T> = {
   transport_attempts: number;
   /** Extra calls the model cost us: repair round-trips after a Zod failure. 0 or 1. */
   repair_attempts: number;
-  /** What we got: the model satisfied the schema first time. Retries don't count. */
+  /**
+   * What we got: the model satisfied the schema first time. Retries don't count.
+   * Always a boolean here — there is an output to judge, or this never returned.
+   * The null case lives on `agent_events`, for a run that produced no output at all.
+   */
   schema_honored: boolean;
+  /**
+   * Total tokens the whole call cost, repairs included — the number a TPM limit
+   * actually counts. Null when no attempt reported usage.
+   */
+  tokens: number | null;
 };
 
 export async function complete<T>({
@@ -80,7 +107,9 @@ export async function complete<T>({
   const model = adapter.models[task];
 
   // claude.md: the Zod schema is the only source of truth for the output shape.
-  const jsonSchema = zodToJsonSchema(schema, { $refStrategy: "none" }) as JsonSchema;
+  // `io: "input"` because this describes what the model must send: a field with a
+  // Zod default is one the model may leave out, which output mode would demand.
+  const jsonSchema = z.toJSONSchema(schema, { io: "input" }) as JsonSchema;
   const native = adapter.supportsStructuredOutput;
   const structured_mode: StructuredMode = native ? "native" : "fallback";
 
@@ -92,14 +121,17 @@ export async function complete<T>({
   let raw = "";
   let issues = "";
   let transport_attempts = 0;
+  // Accumulated across repairs: a retry that cost tokens still cost them.
+  let tokens: number | null = null;
 
   // claude.md: one repair round-trip with the error injected, then give up.
   for (let repair_attempts = 0; repair_attempts < 2; repair_attempts++) {
-    raw = await withLimit(() =>
+    const out = await withLimit(() =>
       withRetry(
         () =>
           adapter.complete({
             model,
+            task,
             system: `${system}\n\n${rules}`,
             prompt: attemptPrompt,
             ...(native ? { jsonSchema } : {}),
@@ -107,6 +139,8 @@ export async function complete<T>({
         () => transport_attempts++,
       ),
     );
+    raw = out.text;
+    if (out.tokens !== null) tokens = (tokens ?? 0) + out.tokens;
     try {
       const parsed = schema.safeParse(JSON.parse(stripFences(raw)));
       if (parsed.success) {
@@ -116,6 +150,7 @@ export async function complete<T>({
           transport_attempts,
           repair_attempts,
           schema_honored: repair_attempts === 0,
+          tokens,
         };
       }
       issues = JSON.stringify(parsed.error.issues);
@@ -125,12 +160,7 @@ export async function complete<T>({
     attemptPrompt = `${prompt}\n\nYour previous answer was rejected:\n${raw}\n\nErrors:\n${issues}\n\nReturn corrected JSON only.`;
   }
 
-  throw new SchemaValidationError(
-    `${adapter.name}/${model} failed schema twice: ${issues}`,
-    adapter.name,
-    model,
-    raw,
-  );
+  throw new SchemaValidationError(`${adapter.name}/${model} failed schema twice: ${issues}`);
 }
 
 export async function embed(texts: string[]): Promise<number[][]> {

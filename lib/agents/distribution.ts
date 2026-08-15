@@ -15,7 +15,7 @@
 // told to restate it — the justification can be wrong prose about a right hour,
 // never the other way round.
 import { inArray } from "drizzle-orm";
-import { z } from "zod";
+import { z } from "zod/v4";
 import type { db as Db } from "../db";
 import { comments } from "../schema";
 import { Schedule, type Signal, type Variant } from "../schemas";
