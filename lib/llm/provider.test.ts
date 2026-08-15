@@ -3,7 +3,15 @@ import test from "node:test";
 import { z } from "zod/v4";
 import type { Adapter } from "./http";
 import { HttpError } from "./http";
-import { SchemaValidationError, adapters, adapterFor, complete, failureCode } from "./provider";
+import {
+  SchemaValidationError,
+  adapters,
+  adapterFor,
+  complete,
+  failureCode,
+  humanError,
+  isRateLimit,
+} from "./provider";
 
 // One schema, one prompt — every provider has to satisfy both.
 const Analysis = z.object({
@@ -61,6 +69,147 @@ test("429 backs off exponentially, then validates the repaired output", async ()
     assert.equal(out.repair_attempts, 0);
   } finally {
     restore();
+  }
+});
+
+// claude.md: the provider's Retry-After wins over the computed backoff. Groq
+// sends it in seconds, fractional ones included, and it is the number that
+// actually clears the TPM window — an exponential 1s guess just spends another
+// call inside a minute that has no budget left.
+test("Retry-After wins over the computed backoff, fractional seconds included", async () => {
+  process.env.LLM_PROVIDER = "groq";
+  process.env.GROQ_API_KEY = "test-key";
+  // Loud enough that honouring it instead would be visible: 1s, 2s, 4s.
+  process.env.LLM_RETRY_BASE_MS = "1000";
+
+  const waits: number[] = [];
+  const realSetTimeout = globalThis.setTimeout;
+  // Record what withRetry asked to sleep, then fire immediately.
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+    waits.push(Number(ms));
+    return realSetTimeout(fn, 0);
+  }) as typeof setTimeout;
+
+  let calls = 0;
+  const restore = stubFetch(async () => {
+    calls++;
+    if (calls <= 2) {
+      return new Response("rate limit exceeded", {
+        status: 429,
+        headers: { "retry-after": "11.4" },
+      });
+    }
+    return okBody('{"sentiment":"positive","themes":["checkout speed"]}');
+  });
+
+  try {
+    const out = await complete({ task: "extraction", system: SYSTEM, prompt: PROMPT, schema: Analysis });
+    assert.equal(out.transport_attempts, 2);
+    assert.deepEqual(waits, [11_400, 11_400], "both retries wait the header, not 1s then 2s");
+  } finally {
+    restore();
+    globalThis.setTimeout = realSetTimeout;
+    process.env.LLM_RETRY_BASE_MS = "1";
+  }
+});
+
+/** Both real Groq 429 bodies, copied off the wire — only the org id is scrubbed. */
+const groq429 = (clause: string, tail: string) =>
+  JSON.stringify({
+    error: {
+      message:
+        "Rate limit reached for model `openai/gpt-oss-120b` in organization " +
+        `\`org_01jq7secret\` service tier \`on_demand\` on ${clause}. ${tail} ` +
+        "Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing",
+      type: "tokens",
+      code: "rate_limit_exceeded",
+    },
+  });
+
+test("a rate limit is reported without the provider's raw body", () => {
+  process.env.LLM_PROVIDER = "groq";
+
+  const perMinute = new HttpError(
+    429,
+    groq429("tokens per minute (TPM): Limit 8000, Used 7481, Requested 2402", "Please try again in 11.4s."),
+    11_400,
+  );
+  assert.ok(isRateLimit(perMinute));
+  const shown = humanError(perMinute);
+  // The numbers that explain it survive; nothing that identifies the account does.
+  assert.match(shown, /8000 tokens\/min/);
+  assert.match(shown, /7481 used/);
+  assert.match(shown, /12s/); // 11.4s of Retry-After, rounded up
+  assert.doesNotMatch(shown, /org_01jq7secret/);
+  assert.doesNotMatch(shown, /gpt-oss-120b/);
+  assert.doesNotMatch(shown, /console\.groq\.com/);
+
+  // The daily limit is a different sentence: it does not clear in a minute, and
+  // its wait arrives as `6m22.752s` rather than plain seconds.
+  const perDay = humanError(
+    new HttpError(
+      429,
+      groq429("tokens per day (TPD): Limit 200000, Used 199607, Requested 1279", "Please try again in 6m22.752s."),
+    ),
+  );
+  assert.match(perDay, /200000 tokens\/day/);
+  assert.match(perDay, /6 min/, "6m22s is six minutes, not the 23s a seconds-only parse reads");
+  assert.doesNotMatch(perDay, /org_01jq7secret/);
+
+  // Anything else from a provider is summarised too — the body never reaches a screen.
+  assert.doesNotMatch(humanError(new HttpError(500, "boom org_01jq7secret")), /org_01jq7secret/);
+  // Our own errors are ours to print: they carry no provider body.
+  assert.equal(humanError(new Error("no brand rules")), "Error: no brand rules");
+  assert.ok(!isRateLimit(new Error("no brand rules")));
+});
+
+// The other half of the 23-minute hang: honouring a Retry-After that long is
+// worse than reporting it, because there is a resume button on the other side.
+test("a Retry-After longer than the cap ends the call instead of sleeping through it", async () => {
+  process.env.LLM_PROVIDER = "groq";
+  process.env.GROQ_API_KEY = "test-key";
+
+  const realSetTimeout = globalThis.setTimeout;
+  const waits: number[] = [];
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+    waits.push(Number(ms));
+    return realSetTimeout(fn, 0);
+  }) as typeof setTimeout;
+
+  let calls = 0;
+  const restore = stubFetch(async () => {
+    calls++;
+    // A per-day limit: Groq asks for 6m22s.
+    return new Response("tokens per day", { status: 429, headers: { "retry-after": "382" } });
+  });
+
+  try {
+    await assert.rejects(
+      complete({ task: "extraction", system: SYSTEM, prompt: PROMPT, schema: Analysis }),
+      (err: unknown) => isRateLimit(err),
+      "the provider's own 429 comes back out, so the caller can park the run on it",
+    );
+    assert.equal(calls, 1, "no retry is spent on a wait we were never going to sit through");
+    assert.deepEqual(waits, [], "and nothing slept");
+
+    // A per-minute wait is under the cap and still gets honoured in full.
+    calls = 0;
+    waits.length = 0;
+    restore();
+    const restoreShort = stubFetch(async () => {
+      calls++;
+      return calls === 1
+        ? new Response("tokens per minute", { status: 429, headers: { "retry-after": "11.4" } })
+        : okBody('{"sentiment":"positive","themes":["checkout speed"]}');
+    });
+    try {
+      await complete({ task: "extraction", system: SYSTEM, prompt: PROMPT, schema: Analysis });
+      assert.deepEqual(waits, [11_400]);
+    } finally {
+      restoreShort();
+    }
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
   }
 });
 

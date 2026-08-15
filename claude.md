@@ -11,6 +11,13 @@ Multi-agent pipeline that turns social media comments into approved campaign bri
   prompt; if it fails again, throw `SchemaValidationError` and mark the campaign
   as `failed`. `needs_human` is a verdict a human is being asked to answer;
   `failed` is a run that threw. Never use one for the other.
+- A 429 that outlives its retries is `rate_limited`, not `failed`. It is the free
+  tier's capacity, not a broken pipeline, and the state it stops on keeps every
+  stage that finished — `start()` skips those on the way back through, so a
+  resume never pays for the analyst and the brief twice.
+- A provider's error body reaches `agent_events.error` and nothing else. It
+  carries the org id and an echo of the request, so what a screen shows comes
+  from `humanError()`: the numbers that explain the failure, none of the rest.
 - Every agent run writes a row to `agent_events`, failed attempts included.
   No exceptions.
 - API keys are used only in server Route Handlers. Never import an LLM client
@@ -44,7 +51,12 @@ Rules:
   A wrong-width vector in pgvector is silent corruption, so we throw instead of
   inserting.
 - Retries on 429 and 5xx: the initial call plus up to 3 retries, waiting 1s, 2s
-  and 4s. The provider's `Retry-After` header wins over the computed delay.
+  and 4s. The provider's `Retry-After` header wins over the computed delay, up to
+  `LLM_MAX_RETRY_WAIT_MS` (60s). Past that the 429 comes straight back out: a
+  per-minute limit asks for seconds and is worth waiting out, a per-day limit
+  asks for minutes, and sitting through three of those is 23 minutes of a run
+  looking hung before it fails anyway. `rate_limited` plus a resume is the better
+  answer, and it arrives in seconds.
 - Prompts in `lib/agents/prompts/` are neutral: no XML tags, no syntax specific
   to any provider.
 
@@ -71,6 +83,11 @@ Document them, don't hide them. They go in the README.
   server instances it does not coordinate, so the effective RPM is multiplied by
   the number of instances. The real fix would be a shared token bucket or a
   queue with a single worker per provider; out of scope for the demo.
+- A full run costs ~11k tokens against Groq's free tier of 8,000 TPM, so it does
+  not fit and no arrangement of the calls makes it. Concurrency moves when tokens
+  are spent, not how many. `rate_limited` there is the expected outcome, not a
+  fault — do not "fix" it by serialising agents. Both fan-outs stay as they are;
+  `gate()`'s is simply where the 429 lands first. See the README.
 
 ## Observability
 

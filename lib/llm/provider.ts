@@ -59,6 +59,44 @@ export function failureCode(err: unknown): string {
   return err instanceof Error && err.name ? err.name : "unknown";
 }
 
+/** A 429 that outlived its retries: free-tier capacity, not a broken pipeline. */
+export const isRateLimit = (err: unknown) => err instanceof HttpError && err.status === 429;
+
+/**
+ * The line a human reads. A provider's error body carries the org id and an echo
+ * of the request, so it never leaves the trace row — this keeps only the numbers
+ * that explain the failure and drops the rest.
+ */
+export function humanError(err: unknown): string {
+  if (!(err instanceof HttpError)) return String(err);
+  const provider = llmProvider();
+  if (err.status !== 429) return `${provider} returned HTTP ${err.status}. Full response in the trace.`;
+
+  const grab = (re: RegExp) => err.body.match(re)?.[1] ?? null;
+  // Thousands separators only — `[\d,]*` would swallow the comma that ends the clause.
+  const limit = grab(/Limit (\d+(?:,\d{3})*)/);
+  const used = grab(/Used (\d+(?:,\d{3})*)/);
+  // Which budget ran out. A per-day limit clears tomorrow, not in a minute, and
+  // telling someone to wait for "the window" is the wrong advice for one of them.
+  const per = grab(/tokens per (day|minute)/);
+
+  // Retry-After is the provider's own number; the body's prose is the fallback,
+  // and it comes as `11.4s` or as `6m22.752s`.
+  const prose = err.body.match(/try again in (?:(\d+)m)?([\d.]+)s/);
+  const secs = err.retryAfterMs
+    ? Math.ceil(err.retryAfterMs / 1000)
+    : prose
+      ? Math.ceil(Number(prose[1] ?? 0) * 60 + Number(prose[2]))
+      : null;
+
+  const unit = per === "day" ? "tokens/day" : "tokens/min";
+  const budget = limit ? ` (${limit} ${unit}${used ? `, ${used} used` : ""})` : "";
+  const when = secs
+    ? ` Retry in about ${secs < 120 ? `${secs}s` : `${Math.round(secs / 60)} min`}.`
+    : " Retry when the window clears.";
+  return `Rate limit reached on ${provider}'s free tier${budget}.${when}`;
+}
+
 const JSON_RULES =
   "Respond with a single JSON object and nothing else: no prose, no markdown code fences.";
 

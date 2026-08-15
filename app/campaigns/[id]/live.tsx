@@ -49,7 +49,14 @@ function editsFrom(variant: Variant, hooksText: string, body: string) {
   return Object.keys(edits).length > 0 ? edits : null;
 }
 
-export function Live({ initial }: { initial: CampaignState }) {
+export function Live({
+  initial,
+  onResume,
+}: {
+  initial: CampaignState;
+  /** Server Action. Only reachable from `rate_limited`, where a resume is cheap. */
+  onResume: (campaign_id: string) => Promise<void>;
+}) {
   const router = useRouter();
   const campaign_id = initial.campaign_id;
   const [live, setLive] = useState(() => liveFrom(initial));
@@ -73,6 +80,8 @@ export function Live({ initial }: { initial: CampaignState }) {
       const frame = parseFrame((event as MessageEvent<string>).data);
       if (!frame) return;
       setLive((current) => applyEvent(current, frame));
+      // A frame is the server answering: whatever the page was waiting on landed.
+      setBusy(false);
       // The trace is server-rendered from agent_events, so it needs the round trip.
       router.refresh();
       if (isTerminal(frame.status)) es.close();
@@ -143,9 +152,37 @@ export function Live({ initial }: { initial: CampaignState }) {
         </span>
       </div>
 
-      {error && (
-        <p className="mt-4 rounded bg-rose-50 p-3 font-mono text-xs text-rose-800">{error}</p>
-      )}
+      {/* A rate limit is prose in amber, not a red monospace dump: the run is
+          intact, the free tier is not. The provider's full response stays in the
+          trace row below, which is where someone debugging goes anyway. */}
+      {error &&
+        (status === "rate_limited" ? (
+          <div className="mt-4 flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+            <p>{error}</p>
+            <button
+              type="button"
+              disabled={busy}
+              // Stays disabled until a frame comes back, not until the action
+              // returns: the action only queues the run, so re-enabling on its
+              // promise is an invitation to start a second one.
+              onClick={() => {
+                setBusy(true);
+                void onResume(campaign_id);
+              }}
+              className="ml-auto rounded bg-amber-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+            >
+              {/* Named after what survived, because that is the whole point:
+                  the run picks up at the first stage with nothing on the state. */}
+              {campaign.variants.length > 0
+                ? "Resume from the drafts"
+                : campaign.brief
+                  ? "Resume from the brief"
+                  : "Resume"}
+            </button>
+          </div>
+        ) : (
+          <p className="mt-4 rounded bg-rose-50 p-3 font-mono text-xs text-rose-800">{error}</p>
+        ))}
 
       {campaign.signals[0] && (
         <p className="mt-6 text-sm text-neutral-600">

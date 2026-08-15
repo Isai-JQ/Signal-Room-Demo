@@ -9,14 +9,33 @@
 import { asc, eq } from "drizzle-orm";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { after } from "next/server";
 import { Fragment } from "react";
 import { z } from "zod/v4";
 import { db } from "@/lib/db";
+import { load, start } from "@/lib/pipeline";
 import { agent_events, campaigns } from "@/lib/schema";
 import { CampaignState } from "@/lib/schemas";
 import { Live } from "./live";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Pick a rate-limited run back up. A Server Action rather than a route, like the
+ * start button on the campaign list — the client already has an open stream, so
+ * there is nothing to hand back: `start()` skips the stages that already have an
+ * output and its transitions arrive on the same feed.
+ */
+async function resumeCampaign(campaign_id: string) {
+  "use server";
+  // A Server Action is reachable by anyone who can POST to it, so the status is
+  // checked here and not only by the button that hides itself. Resuming a run
+  // that is not parked is either a double-click or a second pipeline over the
+  // same campaign — the exact token spend this whole change exists to avoid.
+  const state = await load(db, campaign_id);
+  if (state.status !== "rate_limited") return;
+  after(start(db, { campaign_id }).catch(() => {}));
+}
 
 export default async function CampaignPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -42,7 +61,7 @@ export default async function CampaignPage({ params }: { params: Promise<{ id: s
       </Link>
       <h1 className="mt-2 font-mono text-sm text-neutral-500">{id}</h1>
 
-      <Live initial={CampaignState.parse(row.state)} />
+      <Live initial={CampaignState.parse(row.state)} onResume={resumeCampaign} />
 
       <h2 className="mt-10 text-lg font-semibold">Trace</h2>
       <p className="mt-1 text-sm text-neutral-500">

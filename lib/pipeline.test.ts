@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { db as Db } from "./db";
-import { decide, PipelineError, shippableVariantIds, worstVerdict } from "./pipeline";
+import { decide, PipelineError, shippableVariantIds, start, worstVerdict } from "./pipeline";
 import { brand_rules, campaigns } from "./schema";
 import { CampaignState, CampaignStatus, HumanDecision, type Approval } from "./schemas";
 
@@ -206,6 +206,81 @@ test("an edit is re-gated, and a blocked rewrite is not persisted as approved", 
     const agentVerdicts = state.approvals.filter((a) => a.reviewer === "agent");
     assert.equal(agentVerdicts.length, 2);
     assert.equal(agentVerdicts[1]?.verdict, "rejected");
+  } finally {
+    restore();
+  }
+});
+
+// --- resuming a rate-limited run ---------------------------------------------
+
+/**
+ * Parked at `rate_limited` with the brief already done — the shape of the run
+ * that used to be lost. The variants are missing because that is where it died.
+ */
+const rateLimitedState = () =>
+  CampaignState.parse({
+    campaign_id: "44444444-4444-4444-8444-444444444444",
+    status: "rate_limited",
+    error: "Rate limit reached on groq's free tier (8000 tokens/min, 7481 used).",
+    signals: blockedState().signals,
+    brief: {
+      headline: "put them on",
+      audience: "sneaker buyers who want fit, not packaging",
+      angle: "wear the shoe on camera",
+      format: "TikTok, 30-45s, vertical",
+      key_messages: ["show the crease"],
+      signal_ids: ["sig-1"],
+    },
+  });
+
+/** One canned body that satisfies both a draft and a gate call — Zod strips the rest. */
+function stubDraftAndGate() {
+  const real = globalThis.fetch;
+  process.env.LLM_PROVIDER = "groq";
+  process.env.GROQ_API_KEY = "test-key";
+  globalThis.fetch = (async () =>
+    Response.json({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              hooks: ["lace up", "day one"],
+              body: "walk to the corner and back",
+              hashtags: [],
+              violations: [],
+            }),
+          },
+        },
+      ],
+    })) as unknown as typeof fetch;
+  return () => {
+    globalThis.fetch = real;
+  };
+}
+
+test("a resumed run picks up at the drafts and never re-pays for the brief", async () => {
+  const restore = stubDraftAndGate();
+  const { db, events } = fakeDb(rateLimitedState(), RULES);
+  try {
+    const state = await start(db, { campaign_id: rateLimitedState().campaign_id });
+
+    // The proof that the analyst and the brief were skipped is that the run
+    // finished at all: neither one can reach a comments table or an embedding
+    // endpoint through this stub, so running either would have thrown.
+    // Sorted: both halves fan out, so which of the three lands first is theirs
+    // to decide. What matters is which agents ran at all, and which did not.
+    assert.deepEqual(
+      events.map((e) => e.agent).sort(),
+      ["creative:demo", "creative:proof", "creative:story", "guardian", "guardian", "guardian"],
+      "only the stages with nothing on the state should have run",
+    );
+    // Promise.all keeps its input order, so a variant still matches its treatment.
+    assert.deepEqual(
+      state.variants.map((v) => v.treatment),
+      ["demo", "story", "proof"],
+    );
+    assert.equal(state.brief?.headline, "put them on", "the brief that survived is the one reused");
+    assert.equal(state.status, "awaiting_approval");
   } finally {
     restore();
   }

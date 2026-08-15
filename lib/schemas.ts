@@ -137,6 +137,11 @@ export const Schedule = z.object({
  * threw. Keeping it apart from `needs_human` is the point — one is a decision
  * waiting on a person, the other is a crash waiting on nobody, and a list that
  * paints them the same sends someone to review a stack trace.
+ *
+ * `rate_limited` is split off `failed` for the same reason. The free tier ran out
+ * of tokens per minute; nothing about the run was wrong, and everything it had
+ * already produced is still on the state. Like `awaiting_approval` it is a rest,
+ * not an end — `start()` picks the run back up from the last stage that finished.
  */
 export const CampaignStatus = z.enum([
   "collecting",
@@ -148,6 +153,7 @@ export const CampaignStatus = z.enum([
   "awaiting_approval",
   "scheduled",
   "needs_human",
+  "rate_limited",
   "failed",
 ]);
 
@@ -161,7 +167,11 @@ export const CampaignState = z.object({
   variants: z.array(Variant).default([]),
   approvals: z.array(Approval).default([]),
   schedule: z.array(Schedule).default([]),
-  /** Set only alongside `failed`: what threw, so the trace view has it without a join. */
+  /**
+   * Set alongside `failed` and `rate_limited`: why the run stopped, in prose a
+   * human can read. Never the provider's raw body — that carries the org id and
+   * stays on `agent_events.error`, where the trace shows it.
+   */
   error: z.string().nullable().default(null),
 });
 

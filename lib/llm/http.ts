@@ -45,6 +45,19 @@ export class HttpError extends Error {
 const retryBaseMs = () => Number(process.env.LLM_RETRY_BASE_MS ?? 1000);
 const concurrency = () => Math.max(1, Number(process.env.LLM_CONCURRENCY ?? 2));
 
+/**
+ * The longest wait we will sit through before handing the problem back.
+ *
+ * `Retry-After` still wins over the computed backoff — it just no longer wins
+ * over the caller. A per-minute limit asks for seconds and is worth waiting out;
+ * a per-day limit asks for minutes, and honouring three of those in a row is how
+ * one call spent 23 minutes looking hung and then failed anyway. Past the cap the
+ * campaign parks at `rate_limited` in seconds, with a resume for when the window
+ * has actually cleared. 60s because a TPM window is 60s: every wait a
+ * per-minute limit can legitimately ask for still gets honoured.
+ */
+const maxWaitMs = () => Number(process.env.LLM_MAX_RETRY_WAIT_MS ?? 60_000);
+
 const MAX_RETRIES = 3; // 3 retries after the first try → waits 1s, 2s, 4s
 
 export async function request<T>(url: string, init: RequestInit): Promise<T> {
@@ -78,8 +91,12 @@ export async function withRetry<T>(
       const retryable =
         err instanceof HttpError && (err.status === 429 || err.status >= 500);
       if (!retryable || attempt >= MAX_RETRIES) throw err;
+      const wait = err.retryAfterMs ?? retryBaseMs() * 2 ** attempt;
+      // Waiting this one out costs more than reporting it. Throw the provider's
+      // own error so the caller still sees a 429 and can park the run on it.
+      if (wait > maxWaitMs()) throw err;
       onRetry?.();
-      await sleep(err.retryAfterMs ?? retryBaseMs() * 2 ** attempt);
+      await sleep(wait);
     }
   }
 }

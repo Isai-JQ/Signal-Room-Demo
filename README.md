@@ -84,6 +84,15 @@ last distinction is deliberate — `needs_human` is a decision waiting on a pers
 differently so a stack trace never lands in someone's review queue. Every
 transition is one SSE frame carrying the whole state.
 
+`rate_limited` is split off `failed` for the same reason. Groq's free tier is
+8,000 tokens a minute for the whole org, and a run that spends it stops on a 429
+its retries could not outlast — nothing about the run was wrong. It is painted
+amber rather than red, the banner reads as prose instead of the provider's JSON
+(that stays in the trace row, where the org id is not on someone's screen), and
+because `start()` skips every stage that already has an output on the state, the
+button next to it picks the run back up at the drafts rather than re-running the
+analyst and the brief.
+
 ### A real run
 
 The corpus is 400 comments under one creator's sneaker unboxing. The densest
@@ -237,6 +246,7 @@ Groq.
 | `EMBEDDING_DIM` | `768` | Width of the pgvector columns, read at import. `embed()` throws if the adapter's width disagrees, because a wrong-width vector is silent corruption. |
 | `LLM_CONCURRENCY` | `2` | Cap on in-flight provider calls. Free tiers run 15-30 RPM. |
 | `LLM_RETRY_BASE_MS` | `1000` | Backoff base for 429/5xx: 1s, 2s, 4s, three retries. `Retry-After` wins over it. |
+| `LLM_MAX_RETRY_WAIT_MS` | `60000` | The longest `Retry-After` we sit through. Above it the 429 comes back out and the campaign parks at `rate_limited` — see below. A TPM window is 60s, so every wait a per-minute limit can ask for is still honoured. |
 | `ANALYST_SIMILARITY_THRESHOLD` | `0.7` (fallback in `lib/agents/analyst.ts`) | Cosine cut-off for "same theme". |
 | `NEAR_DUPLICATE_THRESHOLD` | `0.9` (fallback in `lib/agents/analyst.ts`) | Above this, two comments count as one wording for cluster density. |
 
@@ -328,6 +338,25 @@ scripts/                   run-pipeline.ts, eval.ts
   channel spends against it like any other token — so the 429 arrives far earlier
   than the size of the visible output suggests. That one *is* retried, with the
   1s/2s/4s backoff.
+- **A full run does not fit in Groq's free tier, and no arrangement of the calls
+  makes it fit.** Measured per run: analyst and brief ~1.8k tokens each, three
+  drafts ~0.8k each, three gate calls ~1.8k each — about 11k against a budget of
+  8,000 tokens per minute for the whole org. Concurrency changes when the tokens
+  are spent, never how many, so there is no fan-out setting that avoids the 429.
+  Serialising `draft()` was tried and measured: `transport_attempts` on every
+  `creative:*` row was 0 both ways, so it bought nothing and only lengthened the
+  run — the calls are still fanned out.
+
+  Where it lands first is `gate()`'s three concurrent `reasoning` calls, which
+  fire right after the drafts have already drained most of the window. That fan-out
+  is left as it is for the same reason: serialising it spreads the same 11k over a
+  budget that still cannot hold it.
+
+  So `rate_limited` on the free tier is the expected outcome, not a fault. The
+  pipeline is built to land there honestly — the run keeps every stage it
+  finished, the banner says which budget ran out, and the resume picks up at the
+  drafts once the window clears. A tier whose TPM covers a run, or `--delay 60`
+  between eval runs, is what makes it go away.
 - **`pnpm eval` measures one provider per invocation.** It runs the pipeline `N`
   times (`--runs`, default 3) against whatever `LLM_PROVIDER` is set to, then
   aggregates `agent_events` by provider and model: the `schema_honored` rate over

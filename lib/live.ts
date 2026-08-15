@@ -12,7 +12,13 @@ export type Live = {
   history: CampaignStatus[];
 };
 
-/** Nothing follows these, so a late frame after one of them is stale by definition. */
+/**
+ * Nothing follows these, so a late frame after one of them is stale by definition.
+ *
+ * `rate_limited` is not here on purpose, for the same reason `awaiting_approval`
+ * is not: both are rests the run resumes from, on the same feed. Closing the
+ * stream on one would mean the frames the resume emits arrive at nobody.
+ */
 const TERMINAL = new Set<CampaignStatus>(["scheduled", "rejected", "needs_human", "failed"]);
 
 /** The run is over: the client closes its EventSource instead of reconnecting forever. */
@@ -29,6 +35,9 @@ export const STATUS_TONE: Record<CampaignStatus, string> = {
   scheduled: "bg-emerald-600 text-white",
   rejected: "bg-rose-100 text-rose-800",
   needs_human: "bg-amber-300 text-amber-950",
+  // Amber, not red: the free tier ran out of tokens for a minute. Painting it
+  // like `failed` is what made a capacity limit read as a crash.
+  rate_limited: "bg-amber-100 text-amber-900",
   // Not a verdict and not a queue: the run threw. Grey rather than red, because
   // a red badge next to needs_human is what made the two look interchangeable.
   failed: "bg-neutral-800 text-white",

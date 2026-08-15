@@ -27,6 +27,10 @@ export async function draft(
     campaign_id = null,
   }: { brief: Brief; platform: Platform; campaign_id?: string | null },
 ): Promise<Variant[]> {
+  // Fanned out, and measured that way: serialising these was tried against the
+  // free tier and bought nothing. `transport_attempts` on every `creative:*` row
+  // was 0 in both arrangements — the drafts are not what the 429 lands on (see
+  // Known limitations in the README), so serial only made the run longer.
   return Promise.all(
     TREATMENTS.map(async (treatment) => {
       const out = await runAgent({

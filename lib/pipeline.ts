@@ -14,6 +14,7 @@ import { draft, gate } from "./agents/creative";
 import { scheduleVariants } from "./agents/distribution";
 import type { db as Db } from "./db";
 import { isBlocked, isTerminal, lastGateVerdict } from "./live";
+import { humanError, isRateLimit } from "./llm/provider";
 import { campaigns } from "./schema";
 import {
   Approval,
@@ -111,6 +112,23 @@ async function commit(
   return next;
 }
 
+/**
+ * Every way a run stops badly goes through here, so the two questions are
+ * answered in one place: is this a crash or a limit, and what may a human read.
+ *
+ * A 429 that outlived its retries is not a failure of the pipeline — it is the
+ * free tier's capacity, and everything the run already produced is still on the
+ * state it commits. The message is prose, never the provider's body: that keeps
+ * the org id off the screen, and the trace row still has the whole thing.
+ */
+const fail = (
+  db: typeof Db,
+  state: CampaignState,
+  err: unknown,
+  onTransition?: OnTransition,
+): Promise<CampaignState> =>
+  commit(db, state, isRateLimit(err) ? "rate_limited" : "failed", onTransition, humanError(err));
+
 export async function load(db: typeof Db, campaign_id: string): Promise<CampaignState> {
   const [row] = await db.select().from(campaigns).where(eq(campaigns.id, campaign_id)).limit(1);
   if (!row) throw new PipelineError(`no campaign ${campaign_id}`, 404);
@@ -139,8 +157,13 @@ export async function create(
  * the column the trace view filters on, and without it two overlapping runs are
  * indistinguishable.
  *
- * Returns at `rejected`, `needs_human`, `failed` or `awaiting_approval`. Nothing
- * here reaches Distribution.
+ * Every stage is skipped when its output is already on the state, which is what
+ * makes this the resume path too: a run that stopped at `rate_limited` after the
+ * brief picks back up at the drafts instead of paying for the analyst and the
+ * brief a second time — the tokens that were the problem in the first place.
+ *
+ * Returns at `rejected`, `needs_human`, `rate_limited`, `failed` or
+ * `awaiting_approval`. Nothing here reaches Distribution.
  */
 export async function start(
   db: typeof Db,
@@ -155,21 +178,32 @@ export async function start(
   const campaign_id = state.campaign_id;
 
   try {
-    const signal = await analyze(db, { campaign_id });
-    state = await commit(db, { ...state, signals: [signal] }, "signals", onTransition);
+    let signal = state.signals[0];
+    if (!signal) {
+      signal = await analyze(db, { campaign_id });
+      state = await commit(db, { ...state, signals: [signal] }, "signals", onTransition);
+    }
 
-    const brief = await buildBrief(db, signal, { campaign_id });
-    state = await commit(db, { ...state, brief }, "brief", onTransition);
+    let brief = state.brief;
+    if (!brief) {
+      brief = await buildBrief(db, signal, { campaign_id });
+      state = await commit(db, { ...state, brief }, "brief", onTransition);
+    }
 
-    // No platform given: the signal's own, alphabetically stable rather than
-    // arbitrary. Pass one explicitly when the campaign has a target channel.
-    const variants = await draft(db, {
-      brief,
-      platform: platform ?? signal.platforms[0]!,
-      campaign_id,
-    });
-    state = await commit(db, { ...state, variants }, "variants", onTransition);
+    let variants = state.variants;
+    if (variants.length === 0) {
+      // No platform given: the signal's own, alphabetically stable rather than
+      // arbitrary. Pass one explicitly when the campaign has a target channel.
+      variants = await draft(db, {
+        brief,
+        platform: platform ?? signal.platforms[0]!,
+        campaign_id,
+      });
+      state = await commit(db, { ...state, variants }, "variants", onTransition);
+    }
 
+    // The gate always re-runs: a verdict is cheap next to a draft, and a partial
+    // set of them from a run that died mid-gate is not a verdict on the campaign.
     const approvals = await gate(db, variants, { campaign_id });
     const verdict = worstVerdict(approvals);
     state = await commit(db, { ...state, approvals }, verdict, onTransition);
@@ -181,8 +215,9 @@ export async function start(
   } catch (err) {
     // claude.md: a schema failure marks the campaign failed. Same for anything
     // else that throws — the error goes on the state, then out. Not
-    // `needs_human`: nobody is being asked anything, the run died.
-    await commit(db, state, "failed", onTransition, String(err));
+    // `needs_human`: nobody is being asked anything, the run died. `fail` splits
+    // the one exception off: a rate limit is capacity, and it is resumable.
+    await fail(db, state, err, onTransition);
     throw err;
   }
 }
@@ -229,7 +264,7 @@ async function toDistribution(
     );
     return await commit(db, { ...state, schedule }, "scheduled", onTransition);
   } catch (err) {
-    await commit(db, state, "failed", onTransition, String(err));
+    await fail(db, state, err, onTransition);
     throw err;
   }
 }
@@ -310,7 +345,7 @@ export async function decide(
   } catch (err) {
     // The re-gate threw. The human's decision is still on the record; what is
     // not known is whether the rewrite passes, and that is a crash, not a verdict.
-    await commit(db, { ...state, approvals, variants }, "failed", onTransition, String(err));
+    await fail(db, { ...state, approvals, variants }, err, onTransition);
     throw err;
   }
 
