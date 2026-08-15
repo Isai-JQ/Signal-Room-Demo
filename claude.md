@@ -55,8 +55,9 @@ Rules:
 | Google Gemini | generation and embeddings | Free tier, no card. Data may be used for training. |
 | Ollama | local embeddings and generation | No limits, no cost. Data never leaves the machine. |
 
-Anthropic and OpenAI are out of scope for the demo; the provider layer supports
-them if you want a comparison against paid models.
+Anthropic and OpenAI are out of scope for the demo. The provider layer is built
+for them — an adapter is the only thing missing — but none is registered, so
+setting either value throws Unknown provider.
 
 **Data rule:** no real user content goes to a free tier that may train on it.
 The development seed is synthetic.
@@ -113,6 +114,7 @@ accepts the schema and then ignores it.
 - `pnpm dev` — development server
 - `pnpm db:push` — apply schema
 - `pnpm seed` — generate test comments
+- `pnpm embed` — backfill the pgvector columns (the only step that hits a provider)
 - `pnpm test` — tests (`tsx` to run TypeScript)
 - `pnpm pipeline` — one full run against the DB, one line per status transition
 - `pnpm eval` — run the full pipeline with the active provider

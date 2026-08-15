@@ -1,6 +1,11 @@
 # Signal-Room-Demo
 
-Multi-agent pipeline that turns raw social comments into approved campaign briefs. Typed state handoffs between agents, Zod-validated LLM outputs, RAG over brand rules, and a human approval gate. Next.js · TypeScript · Postgres + pgvector
+Multi-agent pipeline that turns raw social comments into approved campaign
+briefs. Typed state handoffs between agents, Zod-validated LLM outputs, RAG over
+brand rules, and a human approval gate. A brand gate reads every draft against
+the brand's content limits before a human ever sees it, and what a violation
+costs — reject outright, or send it up to a person — is decided in code from the
+rule's severity, not by the model. Next.js · TypeScript · Postgres + pgvector
 
 ## Setup
 
@@ -19,6 +24,244 @@ pnpm embed                   # backfill the pgvector columns
 
 Then `pnpm dev`.
 
+## Pipeline
+
+Five agents, in order, plus a human in the middle. They never pass each other
+prose: the only thing that moves through the pipeline is a `CampaignState`
+(`lib/schemas.ts`) that is re-parsed with Zod at every transition and persisted
+to `campaigns.state` before it is announced. Every model output is validated
+against its own Zod schema too — one repair round-trip with the validation
+errors injected into the prompt, and if that fails the campaign is marked
+`needs_human` rather than allowed to continue on a half-parsed object.
+
+**Analyst** (`lib/agents/analyst.ts`) reads embedded comments out of Postgres and
+clusters them in code, not in the model. For every comment it collects the others
+within `ANALYST_SIMILARITY_THRESHOLD` cosine similarity and scores the
+neighbourhood by *distinct phrasings* — anything within
+`NEAR_DUPLICATE_THRESHOLD` of a comment already counted adds nothing. That
+distinction is what keeps the winner from being whichever sentence got copied
+most. The densest neighbourhood's 30 closest members are the only thing the model
+ever sees. It emits a `Signal`: a claim, a summary, sentiment, confidence and
+cited evidence ids. The ids are checked against what was actually sent, invented
+ones are dropped, and `volume` and `platforms` are counted here from the evidence
+that survived — a model that cannot be trusted with ids cannot be trusted to
+tally them either.
+
+**Brief** (`lib/agents/brief.ts`) takes the Signal and nothing else. It embeds
+the claim, pulls the five nearest `brand_rules` by cosine distance, and asks for
+a `Brief`: headline, audience, `angle` (the concept of the video the creator
+shoots), `format` (the platform and the run time), up to five `key_messages`, and
+the rule ids it actually applied — checked against the ids it was sent, same as
+the Analyst's evidence.
+
+**Creative** (`lib/agents/creative.ts`) fans the one angle out into three
+`Variant`s, one per treatment — `demo` | `story` | `proof` — in parallel. The
+treatments are different skeletons, not different moods: `demo` opens on the
+thing being used, `story` drops the viewer mid-scene, `proof` is a side-by-side
+test. Each variant carries two or three `hooks`, which are the opening lines the
+creator says to camera, and a `body` that is direction for the shoot, beat by
+beat. Nothing here is a reply to a commenter.
+
+**Guardian** — the `gate()` half of the same file, a separate call because a
+drafter grading its own draft is not a review — checks each variant against
+*every* brand rule, not the five the Brief retrieved, because enforcement is not
+a similarity search. The model only reports violations; severity decides the
+verdict in code: any `block` rule makes it `rejected`, a `warn` rule alone makes
+it `needs_human`, none makes it `approved`. Violations naming a rule id that does
+not exist are dropped. The worst verdict of the three becomes the campaign's.
+
+If the gate clears everything the campaign parks at `awaiting_approval` and stops.
+**Distribution** (`lib/agents/distribution.ts`) only runs after a human decides.
+It re-reads the timestamps behind the signal's surviving evidence, buckets them
+by hour of day, and takes the peak — arithmetic, in code. The model writes one
+thing: the `rationale` sentence that explains the hour it was handed.
+
+Status walks `collecting → signals → brief → variants → approved →
+awaiting_approval → scheduled`, with `rejected` and `needs_human` as the other
+two ends. Every transition is one SSE frame carrying the whole state.
+
+### A real run
+
+The corpus is 400 comments under one creator's sneaker unboxing. The densest
+cluster of distinct phrasings is people asking to see the shoes *worn* — "an
+unworn shoe tells me nothing", "every angle except somebody actually wearing",
+"cardboard is cool but where is the fit pic" — lines that share meaning and
+almost no words, which is exactly the gap keyword grouping cannot close and
+embeddings can. What the Analyst returned:
+
+```
+claim:      The post shows the product from every angle but never shows anyone
+            actually wearing it.
+summary:    Viewers are asking to see the clothing modeled on a person rather
+            than just flat shots.
+sentiment:  negative      confidence: high
+volume:     4 comments    platforms: instagram, tiktok, x
+```
+
+And the Brief built from it, with four retrieved brand rules applied:
+
+```
+headline:   See the fit in action: watch the piece worn and styled live
+audience:   Viewers on Instagram/TikTok wanting to see the clothing modeled on
+            a real person
+angle:      Creator models the garment on-camera, showing movement and real-world fit
+format:     Vertical short-form video for TikTok/Reels (15-30 seconds)
+on camera:  I'm wearing the product right now so you can see how it looks on a
+            real person
+            Here's a close-up of the details and how the fabric drapes when I move
+            I'm styling it with a simple outfit to show everyday versatility
+            The colour matches exactly what's shown on the product page
+            Let me know in the comments what you think about the fit and style
+```
+
+Three treatments were drafted off that angle, the gate approved all three, and
+the campaign stopped at `awaiting_approval`. `pnpm pipeline` prints the same
+walk-through, with the human step auto-granted because there is no human in a
+script.
+
+## The human gate
+
+The gate's `approved` is not a decision to publish. It clears or blocks each of
+the three variants independently; a person picks the one that ships, and that
+choice can go against the gate. `POST /api/campaigns/[id]/approve` takes a
+`HumanDecision` — `approve`, `edit` or `reject`, always naming a `variant_id` and
+a `reviewed_by` — and records it as an `Approval` with `reviewer: "human"`
+alongside the agent's, never replacing it.
+
+Saying yes to a variant the gate blocked is an override, and an override is not
+allowed to be quiet. `approve` and `edit` on a variant the gate marked `rejected`
+or `needs_human` are rejected with a 400 unless they carry a `reason`, and the
+verdict that was overruled is stored on the record in `overrode` — so the audit
+trail says *which* verdict was gone against, not merely that something was. A
+variant the gate never judged at all counts as blocked for this purpose. The UI
+paints an override differently from a plain approve. `reject` never needs an
+override: agreeing with the gate is not going against it, though `reason` is
+required to reject or edit either way.
+
+`edit` is not a bypass. The human may rewrite `hooks`, `body` and `hashtags`; the
+result is re-parsed as a `Variant` and sent back through the gate, because the
+rewritten copy is not the copy the gate cleared. If the re-gate blocks it, the
+campaign ends at *that* verdict — the human's approve stays on the record next to
+the verdict contradicting it, and nothing is scheduled. Only a clean re-gate
+reaches Distribution.
+
+## The trace
+
+`agent_events` holds one row per agent run, failed attempts included — the run
+that threw is the most interesting row on the page, so nothing is filtered out of
+the trace view. The columns (`lib/schema.ts`): `campaign_id` (nullable), `agent`,
+`task`, `provider`, `model`, `structured_mode`, `transport_attempts`,
+`repair_attempts`, `schema_honored`, `input_hash`, `output`, `tokens`,
+`latency_ms`, `error`, `ts`. `campaign_id` is what the view filters on; without
+it you are searching by time range, which breaks the moment two runs overlap.
+
+The run above, as the trace shows it — nine rows for one campaign, three of them
+the parallel creative fan-out and three the per-variant gate:
+
+```
+agent           task       provider  model                mode    honored  transport  repair    ms
+analyst         reasoning  groq      openai/gpt-oss-120b  native  true     0          0       2469
+brief           reasoning  groq      openai/gpt-oss-120b  native  true     0          0       2830
+creative:demo   drafting   groq      openai/gpt-oss-20b   native  true     0          0       1312
+creative:story  drafting   groq      openai/gpt-oss-20b   native  true     0          0       1315
+creative:proof  drafting   groq      openai/gpt-oss-20b   native  true     0          0       3697
+guardian        reasoning  groq      openai/gpt-oss-120b  native  true     0          0       1577
+guardian        reasoning  groq      openai/gpt-oss-120b  native  true     0          0       1694
+guardian        reasoning  groq      openai/gpt-oss-120b  native  true     0          0       3204
+distribution    drafting   groq      openai/gpt-oss-20b   native  true     0          0        490
+```
+
+**`structured_mode` is what was asked for; `schema_honored` is what happened.**
+`native` means the JSON Schema derived from the Zod schema was handed to the
+provider's own structured-output mechanism; `fallback` means the adapter does not
+support one and the schema was injected into the prompt instead. `native` with a
+low honored rate is the interesting failure: the provider accepts the schema and
+then ignores it.
+
+The two retry counters are deliberately separate because they blame different
+things. `transport_attempts` counts extra calls caused by 429 and 5xx retries — a
+provider capacity problem that says nothing about the model. `repair_attempts`
+counts extra calls caused by a Zod validation failure, so it is 0 or 1: one
+repair round-trip is all there is. `schema_honored` is `repair_attempts === 0`
+and ignores `transport_attempts` entirely — a call that got rate-limited twice
+and then validated first time is still an honored schema, and folding the two
+together would hide which half of the stack is actually failing.
+
+## Providers
+
+Every model call goes through `lib/llm/provider.ts`; agents declare a semantic
+task (`reasoning` | `extraction` | `drafting`) and never a model name. Adding a
+provider is one adapter in `lib/llm/adapters/` plus one line in the registry, and
+no agent changes.
+
+| Provider | Generation | Embeddings | Notes |
+|---|---|---|---|
+| `groq` | `openai/gpt-oss-120b` (reasoning, extraction), `openai/gpt-oss-20b` (drafting) | none — the adapter declares no embedding model | Default for `LLM_PROVIDER`. Free tier, no card. Native structured output; rate limits are org-wide. |
+| `gemini` | `gemini-2.5-pro` (reasoning), `gemini-2.5-flash` (extraction, drafting) | `text-embedding-004`, 768 dims | Free tier, no card. Data may be used for training. Native structured output, via an allowlisted OpenAPI subset of the JSON Schema. |
+| `ollama` | `qwen2.5:7b-instruct` (all three tasks) | `nomic-embed-text`, 768 dims | Default for `EMBEDDING_PROVIDER`. Local, no limits, no cost, data never leaves the machine. |
+
+**Data rule:** no real user content goes to a free tier that may train on it.
+That is why the development corpus is synthetic.
+
+## Environment variables
+
+Everything except `DATABASE_URL` and the active provider's key has a fallback in
+code, so a clone with no `.env.local` still runs against a local Postgres and
+Groq.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `DATABASE_URL` | **required** | Postgres connection string (`lib/db.ts`). |
+| `GROQ_API_KEY` | **required for `groq`** | Only read by the Groq adapter. |
+| `GEMINI_API_KEY` | **required for `gemini`** | Generation and embeddings. |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Where the local Ollama server is. |
+| `LLM_PROVIDER` | `groq` | `groq` \| `gemini` \| `ollama`. |
+| `EMBEDDING_PROVIDER` | `ollama` | `ollama` \| `gemini` — Groq serves no embeddings. |
+| `EMBEDDING_DIM` | `768` | Width of the pgvector columns, read at import. `embed()` throws if the adapter's width disagrees, because a wrong-width vector is silent corruption. |
+| `LLM_CONCURRENCY` | `2` | Cap on in-flight provider calls. Free tiers run 15-30 RPM. |
+| `LLM_RETRY_BASE_MS` | `1000` | Backoff base for 429/5xx: 1s, 2s, 4s, three retries. `Retry-After` wins over it. |
+| `ANALYST_SIMILARITY_THRESHOLD` | `0.7` (fallback in `lib/agents/analyst.ts`) | Cosine cut-off for "same theme". |
+| `NEAR_DUPLICATE_THRESHOLD` | `0.9` (fallback in `lib/agents/analyst.ts`) | Above this, two comments count as one wording for cluster density. |
+
+Both thresholds are also set explicitly in `.env.example`, at the same values as
+the code defaults. See Known limitations for why they are not portable.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `pnpm dev` | Next dev server (Turbopack). |
+| `pnpm build` / `pnpm start` | Production build and server. |
+| `pnpm lint` | `next lint`. |
+| `pnpm db:push` | Push the Drizzle schema to the database. |
+| `pnpm db:generate` | Generate a migration from the schema instead of pushing. |
+| `pnpm seed` | Replace both corpora: 400 synthetic comments and 12 brand rules. Offline, deterministic, no embeddings. |
+| `pnpm embed` | Backfill every `embedding IS NULL` row in `comments` and `brand_rules`. The only step that needs a provider. |
+| `pnpm pipeline` | One full run against the real database, one line per transition, then the signal, brief, all three treatments with their hooks, the verdicts and the schedule. Exits non-zero unless it reached `scheduled`. |
+| `pnpm test` | `node:test` over the schema, seed, provider, pipeline, live and agent suites. |
+
+## Project structure
+
+```
+app/
+  page.tsx                 campaign list + the Server Action that starts a run
+  campaigns/[id]/          one campaign: server-rendered state and trace…
+  campaigns/[id]/live.tsx  …plus the one Client Component: SSE + approval controls
+  api/campaigns/           POST to start, [id]/stream for SSE, [id]/approve for the human gate
+lib/
+  schemas.ts               the Zod schemas — the only source of truth for the data's shape
+  schema.ts                Drizzle tables: comments, brand_rules, campaigns, agent_events
+  pipeline.ts              the orchestration: start(), decide(), resume(), transitions
+  live.ts                  pure helpers shared by the server page and the client component
+  seed.ts / embed.ts       synthetic corpus, and the pgvector backfill
+  agents/                  analyst, brief, creative (+ gate), distribution, and run.ts
+  agents/prompts/          provider-neutral prompts; none describes the output shape
+  llm/                     provider.ts (complete/embed), http.ts (retry, limiter)
+  llm/adapters/            groq, gemini, ollama — one file each
+db/init.sql                CREATE EXTENSION vector, on first boot of the volume
+scripts/                   run-pipeline.ts, run-analyst.ts
+```
+
 ## Known limitations
 
 - **The concurrency limiter is process-local** (`lib/llm/http.ts`). With several
@@ -28,10 +271,10 @@ Then `pnpm dev`.
 - **`db/init.sql` only runs on an empty volume.** If you created the database
   before that file existed, `docker compose down -v` or run
   `CREATE EXTENSION IF NOT EXISTS vector;` by hand once.
-- **The seed corpus is synthetic and fixed** (`SEED` in `lib/seed.ts`). That is
-  what makes `pnpm eval` comparable across providers, and it keeps real user
-  content off free tiers that may train on it. It is also narrower than real
-  comment data: six topics, no other languages, no spam.
+- **The seed corpus is synthetic and fixed** (`SEED` in `lib/seed.ts`). It keeps
+  real user content off free tiers that may train on it, and it makes two runs
+  comparable. It is also narrower than real comment data: six topics, no other
+  languages, no spam.
 - **The clustering thresholds are tuned to one embedding model.**
   `ANALYST_SIMILARITY_THRESHOLD` and `NEAR_DUPLICATE_THRESHOLD` (0.70 / 0.90, the
   defaults in `lib/agents/analyst.ts`, mirrored in `.env.example` as the override)
@@ -47,3 +290,15 @@ Then `pnpm dev`.
 - **`pnpm embed` re-embeds nothing, but also detects nothing.** It only fills
   rows where `embedding IS NULL`, so editing a comment's text leaves a stale
   vector behind. Null the column to force a refresh.
+- **Approvals live in `campaigns.state.approvals`, a jsonb array on a row that is
+  overwritten in place.** Every decision is appended, but the row keeps only the
+  latest state, so an `edit` followed by an `approve` leaves the history of that
+  campaign as whatever the last write happened to contain — and nothing outside
+  the campaign can query "every override this month". The audit trail wants its
+  own append-only table with a foreign key, not a field on a mutable row.
+- **`pnpm eval` does not exist.** `claude.md` documents it, and the argument for
+  keeping the corpus fixed and for splitting `structured_mode` from
+  `schema_honored` rests on it reporting the honored rate per provider and model.
+  There is no such script in `package.json`. The trace shows those columns per
+  run, but the aggregate metric — the one that tells you whether a provider's
+  native structured output actually works — is currently unmeasured.
