@@ -16,6 +16,7 @@ import { db } from "@/lib/db";
 import { claimRateLimited, start } from "@/lib/pipeline";
 import { agent_events, campaigns } from "@/lib/schema";
 import { CampaignState } from "@/lib/schemas";
+import { SectionRule } from "../../ui";
 import { Live } from "./live";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +38,31 @@ async function resumeCampaign(campaign_id: string) {
   }
 }
 
+/**
+ * Identity on the left, measurement on the right, and a rule between them: the
+ * first seven columns say which call this was, the last four say what it cost.
+ * Everything measured is right-aligned and tabular so a column of numbers can be
+ * read down its last digit.
+ */
+const TRACE_COLUMNS = [
+  { key: "ts", head: "px-3", cell: "px-3 text-muted" },
+  { key: "agent", head: "px-3", cell: "px-3 text-bone" },
+  { key: "task", head: "px-3", cell: "px-3 text-muted" },
+  { key: "provider", head: "px-3", cell: "px-3 text-muted" },
+  { key: "model", head: "px-3", cell: "px-3 text-bone" },
+  { key: "mode", head: "px-3", cell: "px-3 text-muted" },
+  { key: "honored", head: "px-3", cell: "px-3" },
+  { key: "net", head: "num border-l border-line/70 px-3", cell: "num border-l border-line/70 px-3" },
+  { key: "repair", head: "num px-3", cell: "num px-3" },
+  { key: "tok", head: "num px-3", cell: "num px-3 text-muted" },
+  { key: "ms", head: "num px-3", cell: "num px-3 text-bone" },
+] as const;
+
+/** Zero attempts is the quiet answer; anything above it is worth the eye. */
+const attempts = (n: number) => (
+  <span className={n === 0 ? "text-muted" : "text-bone"}>{n}</span>
+);
+
 export default async function CampaignPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   // A non-uuid would reach Postgres as a cast error, i.e. a 500 for what is
@@ -54,71 +80,147 @@ export default async function CampaignPage({ params }: { params: Promise<{ id: s
     .where(eq(agent_events.campaign_id, id))
     .orderBy(asc(agent_events.ts));
 
+  const failures = events.filter((e) => e.error).length;
+
   return (
-    <main className="mx-auto max-w-6xl p-8">
-      <Link href="/" className="text-sm text-neutral-500 hover:underline">
-        ← campaigns
-      </Link>
-      <h1 className="mt-2 font-mono text-sm text-neutral-500">{id}</h1>
+    <main className="mx-auto max-w-6xl px-6 pb-32">
+      <header className="sticky top-0 z-30 flex h-12 items-center gap-3 border-b border-line bg-bg">
+        <Link href="/" className="label text-muted hover:text-bone">
+          ← campaigns
+        </Link>
+        <span className="label text-line">/</span>
+        <span className="truncate text-data text-bone">{id}</span>
+        {row.is_eval && <span className="label ml-auto shrink-0 text-muted">eval run</span>}
+      </header>
 
       <Live initial={CampaignState.parse(row.state)} onResume={resumeCampaign} />
 
-      <h2 className="mt-10 text-lg font-semibold">Trace</h2>
-      <p className="mt-1 text-sm text-neutral-500">
-        Every agent run against this campaign, failed attempts included.
-      </p>
-      <div className="mt-3 overflow-x-auto">
-        <table className="w-full text-left text-xs">
-          <thead className="border-b border-neutral-300 text-neutral-500">
-            <tr>
-              {["agent", "task", "provider", "model", "mode", "honored", "transport", "repair", "ms"].map(
-                (h) => (
-                  <th key={h} className="px-2 py-1.5 font-medium">
-                    {h}
-                  </th>
-                ),
-              )}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-neutral-200">
-            {events.map((e) => (
-              <Fragment key={e.id}>
-                <tr className={e.error ? "bg-rose-50" : undefined}>
-                  <td className="px-2 py-1.5 font-medium">{e.agent}</td>
-                  <td className="px-2 py-1.5">{e.task}</td>
-                  <td className="px-2 py-1.5">{e.provider}</td>
-                  <td className="px-2 py-1.5 font-mono">{e.model}</td>
-                  <td className="px-2 py-1.5">{e.structured_mode}</td>
-                  {/* null is not a failure: nothing came back to judge. Painting
-                      it red would be the same conflation the column exists to undo. */}
-                  <td
-                    className={`px-2 py-1.5 ${
-                      e.schema_honored === null
-                        ? "text-neutral-400"
-                        : e.schema_honored
-                          ? "text-emerald-700"
-                          : "text-rose-700"
-                    }`}
-                  >
-                    {e.schema_honored === null ? "—" : String(e.schema_honored)}
-                  </td>
-                  <td className="px-2 py-1.5 tabular-nums">{e.transport_attempts}</td>
-                  <td className="px-2 py-1.5 tabular-nums">{e.repair_attempts}</td>
-                  <td className="px-2 py-1.5 tabular-nums">{e.latency_ms}</td>
+      {/* The widest gap on the page, and the only doubled rule. Everything above
+          is what the campaign is; everything below is what the machine did to
+          get there, and the two are read for different reasons. */}
+      <section className="mt-24 border-t-2 border-line pt-10">
+        <SectionRule
+          label="trace"
+          agent="every call"
+          aside={
+            failures > 0
+              ? `${events.length} calls · ${failures} failed`
+              : `${events.length} ${events.length === 1 ? "call" : "calls"}`
+          }
+        />
+        <p className="mt-4 max-w-prose font-sans text-body text-muted">
+          Every agent run against this campaign in the order it happened, failed attempts included.
+          A row with a coral edge came back wrong; the line under it is what came back.
+        </p>
+
+        {events.length === 0 ? (
+          <p className="mt-8 text-data text-muted">
+            No agent runs yet. The first row lands the moment the analyst answers.
+          </p>
+        ) : (
+          <div className="mt-6">
+            {/* No overflow wrapper on purpose. `overflow-x: auto` also computes
+                overflow-y to auto, which makes the wrapper the scrollport for
+                everything inside it — the sticky header would then pin to a div
+                that never scrolls vertically and ride off the top with the page.
+                The table fits inside max-w-6xl at this min-width, so on anything
+                projector-sized nothing overflows; narrower than that, the page
+                scrolls sideways and the header still pins correctly.
+
+                `border-separate` for the same reason: a collapsed border belongs
+                to the table, not the cell, so it stays behind when a sticky
+                header moves and the column names end up sitting on the rows. */}
+            <table className="w-full min-w-5xl border-separate border-spacing-0 whitespace-nowrap text-left text-data">
+              <thead>
+                <tr>
+                  {TRACE_COLUMNS.map(({ key, head }) => (
+                    <th
+                      key={key}
+                      // Sticks under the page header so the column names stay
+                      // with the numbers on a trace long enough to scroll.
+                      // Opaque surface, not the page ground: rows have to pass
+                      // behind it, and `bg-surface` is the one band on the table
+                      // that is never see-through.
+                      className={`label sticky top-12 z-20 border-b border-line bg-surface pb-2 pt-2 text-muted ${head}`}
+                    >
+                      {key}
+                    </th>
+                  ))}
                 </tr>
-                {e.error && (
-                  <tr className="bg-rose-50">
-                    <td colSpan={9} className="px-2 pb-2 font-mono text-rose-800">
-                      <strong>{e.error_code}</strong> {e.error}
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {events.length === 0 && <p className="mt-3 text-sm text-neutral-500">No agent runs yet.</p>}
+              </thead>
+              <tbody>
+                {events.map((e) => {
+                  const cells = [
+                    e.ts.toISOString().slice(11, 19),
+                    e.agent,
+                    e.task,
+                    e.provider,
+                    e.model,
+                    e.structured_mode,
+                    // null is not a failure: nothing came back to judge. Painting
+                    // it red would be the same conflation the column exists to undo.
+                    <span
+                      key="honored"
+                      className={
+                        e.schema_honored === null
+                          ? "text-muted"
+                          : e.schema_honored
+                            ? "text-ok"
+                            : "text-alarm"
+                      }
+                    >
+                      {e.schema_honored === null ? "—" : String(e.schema_honored)}
+                    </span>,
+                    attempts(e.transport_attempts),
+                    attempts(e.repair_attempts),
+                    e.tokens ?? "—",
+                    e.latency_ms,
+                  ];
+                  return (
+                    <Fragment key={e.id}>
+                      {/* Row rules live on the cells, not the row: with
+                          `border-separate` a <tr> border never renders. */}
+                      <tr className="even:bg-surface/40">
+                        {TRACE_COLUMNS.map(({ key, cell }, i) => (
+                          <td
+                            key={key}
+                            // The rail, not a red row: a failed attempt is
+                            // findable from across the room without the whole
+                            // line shouting over the ones that worked.
+                            className={`border-b border-line/50 py-1.5 ${cell} ${
+                              i === 0
+                                ? e.error
+                                  ? "border-l-2 border-l-alarm"
+                                  : "border-l-2 border-l-transparent"
+                                : ""
+                            }`}
+                          >
+                            {cells[i]}
+                          </td>
+                        ))}
+                      </tr>
+                      {e.error && (
+                        <tr>
+                          <td className="border-b border-l-2 border-line/50 border-l-alarm" />
+                          <td
+                            colSpan={TRACE_COLUMNS.length - 1}
+                            // Indented to start under `agent`, so the timestamp
+                            // gutter runs unbroken down the whole table.
+                            className="border-b border-line/50 px-3 pb-2 align-top whitespace-normal"
+                          >
+                            <span className="text-alarm">{e.error_code}</span>{" "}
+                            <span className="text-muted">{e.error}</span>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </main>
   );
 }

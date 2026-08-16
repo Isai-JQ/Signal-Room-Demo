@@ -10,14 +10,7 @@
 // on the server and a client bundle never gets a chance to carry one.
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import {
-  applyEvent,
-  gateVerdicts,
-  isBlocked,
-  isTerminal,
-  liveFrom,
-  STATUS_TONE,
-} from "@/lib/live";
+import { applyEvent, gateVerdicts, isBlocked, isTerminal, liveFrom } from "@/lib/live";
 import {
   CampaignStatus,
   StreamEvent,
@@ -25,6 +18,7 @@ import {
   type CampaignState,
   type Variant,
 } from "@/lib/schemas";
+import { Badge, SectionRule, STATUS_TONE, VERDICT_TONE } from "../../ui";
 
 type Action = "approve" | "edit" | "reject";
 
@@ -48,6 +42,14 @@ function editsFrom(variant: Variant, hooksText: string, body: string) {
   if (hooks.length > 0 && hooks.join("\n") !== variant.hooks.join("\n")) edits.hooks = hooks;
   return Object.keys(edits).length > 0 ? edits : null;
 }
+
+// One section = one rhythm. `SECTION` is the only vertical gap between blocks on
+// this page; the trace sets its own, wider, because it is read for a different
+// reason. Anything smaller is spacing inside a block, never between two.
+const SECTION = "mt-16";
+const FIELD =
+  "mt-2 w-full border border-line bg-bg px-2.5 py-2 text-data text-bone placeholder:text-muted focus:border-bone focus:outline-none";
+const BUTTON = "label border px-3 py-2 disabled:opacity-40";
 
 export function Live({
   initial,
@@ -98,6 +100,7 @@ export function Live({
   const humanCalls = campaign.approvals.filter((a) => a.reviewer === "human");
   const target = campaign.variants.find((v) => v.id === picked) ?? null;
   const targetBlocked = target ? isBlocked(verdicts.get(target.id) ?? null) : false;
+  const signal = campaign.signals[0];
 
   const pick = (variant: Variant) => {
     setPicked(variant.id);
@@ -115,7 +118,7 @@ export function Live({
     if (!reason.trim() && (action !== "approve" || targetBlocked)) {
       return setFailure(
         action === "approve"
-          ? "the gate blocked this variant — approving it is an override, so say why"
+          ? "guardian blocked this variant — approving it is an override, so say why"
           : `reason is required to ${action}`,
       );
     }
@@ -147,14 +150,17 @@ export function Live({
 
   return (
     <section>
-      <div className="mt-4 flex flex-wrap items-center gap-2">
+      {/* The tape: every status this run has been through, in arrival order.
+          Order carries the information — where it stalled, and what it came from. */}
+      <div className="mt-8 flex flex-wrap items-center gap-x-2 gap-y-2">
         {history.map((s, i) => (
-          <span key={`${s}-${i}`} className={`rounded px-2 py-0.5 text-xs font-medium ${STATUS_TONE[s]}`}>
-            {s}
+          <span key={`${s}-${i}`} className="flex items-center gap-2">
+            {i > 0 && <span className="label text-line">→</span>}
+            <Badge tone={STATUS_TONE[s]}>{s}</Badge>
           </span>
         ))}
-        <span className="ml-auto text-xs text-neutral-500">
-          {isTerminal(status) ? "stream closed" : connected ? "live" : "reconnecting…"}
+        <span className="label ml-auto text-muted">
+          {isTerminal(status) ? "stream closed" : connected ? "● live" : "reconnecting…"}
         </span>
       </div>
 
@@ -163,8 +169,8 @@ export function Live({
           trace row below, which is where someone debugging goes anyway. */}
       {error &&
         (status === "rate_limited" ? (
-          <div className="mt-4 flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-            <p>{error}</p>
+          <div className="mt-6 flex flex-wrap items-center gap-4 border border-warn/40 border-l-2 border-l-warn bg-surface px-4 py-3">
+            <p className="font-sans text-body text-bone">{error}</p>
             <button
               type="button"
               disabled={busy}
@@ -175,152 +181,185 @@ export function Live({
                 setBusy(true);
                 void onResume(campaign_id);
               }}
-              className="ml-auto rounded bg-amber-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+              className={`${BUTTON} ml-auto shrink-0 border-warn/60 text-warn hover:bg-warn/10`}
             >
               {/* Named after what survived, because that is the whole point:
                   the run picks up at the first stage with nothing on the state. */}
               {campaign.variants.length > 0
-                ? "Resume from the drafts"
+                ? "resume from the drafts"
                 : campaign.brief
-                  ? "Resume from the brief"
-                  : "Resume"}
+                  ? "resume from the brief"
+                  : "resume"}
             </button>
           </div>
         ) : (
-          <p className="mt-4 rounded bg-rose-50 p-3 font-mono text-xs text-rose-800">{error}</p>
+          <p className="mt-6 border border-alarm/40 border-l-2 border-l-alarm bg-surface px-4 py-3 text-data text-alarm">
+            {error}
+          </p>
         ))}
 
-      {campaign.signals[0] && (
-        <p className="mt-6 text-sm text-neutral-600">
-          <span className="font-medium text-neutral-900">{campaign.signals[0].claim}</span>{" "}
-          — {campaign.signals[0].volume} comments, {campaign.signals[0].sentiment},{" "}
-          {campaign.signals[0].confidence} confidence
-        </p>
+      {/* The thesis. One sentence at the top of the screen, the largest thing on
+          it, and the only reason any of the rest of this page exists. */}
+      {signal && (
+        <div className={SECTION}>
+          <SectionRule label="signal" agent="analyst" />
+          <div className="mt-6 grid gap-8 md:grid-cols-[1fr_auto]">
+            <div>
+              <p className="max-w-2xl font-sans text-claim text-bone">{signal.claim}</p>
+              <p className="mt-4 max-w-prose font-sans text-body text-muted">{signal.summary}</p>
+            </div>
+            <dl className="grid h-fit grid-cols-[auto_1fr] gap-x-6 gap-y-1.5 border-l border-line pl-5 md:min-w-44">
+              <Field label="comments">{signal.volume}</Field>
+              <Field label="sentiment">{signal.sentiment}</Field>
+              <Field label="confidence">{signal.confidence}</Field>
+            </dl>
+          </div>
+        </div>
       )}
 
       {campaign.brief && (
-        <div className="mt-4 rounded border border-neutral-200 p-4">
-          <h2 className="font-semibold">{campaign.brief.headline}</h2>
-          <dl className="mt-2 grid grid-cols-[7rem_1fr] gap-x-4 gap-y-1 text-sm">
-            <dt className="text-neutral-500">audience</dt>
-            <dd>{campaign.brief.audience}</dd>
-            <dt className="text-neutral-500">angle</dt>
-            <dd>{campaign.brief.angle}</dd>
-            <dt className="text-neutral-500">format</dt>
-            <dd>{campaign.brief.format}</dd>
-            <dt className="text-neutral-500">on camera</dt>
-            <dd>
-              <ul className="list-disc pl-4">
+        <div className={SECTION}>
+          <SectionRule label="brief" agent="brief" />
+          <h3 className="mt-6 max-w-2xl font-sans text-lede text-bone">{campaign.brief.headline}</h3>
+          <dl className="mt-6 grid grid-cols-[6rem_1fr] gap-x-6 gap-y-3 md:grid-cols-[9rem_1fr]">
+            <Field label="audience" sans>
+              {campaign.brief.audience}
+            </Field>
+            <Field label="angle" sans>
+              {campaign.brief.angle}
+            </Field>
+            <Field label="format">{campaign.brief.format}</Field>
+            <Field label="on camera" sans>
+              <ul className="space-y-1.5">
                 {campaign.brief.key_messages.map((m) => (
-                  <li key={m}>{m}</li>
+                  <li key={m} className="before:mr-2 before:text-muted before:content-['—']">
+                    {m}
+                  </li>
                 ))}
               </ul>
-            </dd>
+            </Field>
+            {campaign.brief.brand_rules_applied.length > 0 && (
+              <Field label="rules">{campaign.brief.brand_rules_applied.join("  ")}</Field>
+            )}
           </dl>
         </div>
       )}
 
       {campaign.variants.length > 0 && (
-        <div className="mt-6 grid gap-4 md:grid-cols-3">
-          {campaign.variants.map((variant) => (
-            <VariantCard
-              key={variant.id}
-              variant={variant}
-              verdict={verdicts.get(variant.id) ?? null}
-              humanCalls={humanCalls.filter((a) => a.variant_id === variant.id)}
-              picked={picked === variant.id}
-              selectable={status === "awaiting_approval"}
-              onPick={() => pick(variant)}
-            />
-          ))}
+        <div className={SECTION}>
+          <SectionRule
+            label="variants"
+            agent="creative"
+            aside={status === "awaiting_approval" ? "pick one to decide on" : undefined}
+          />
+          <div className="mt-6 grid gap-px bg-line md:grid-cols-3">
+            {campaign.variants.map((variant) => (
+              <VariantColumn
+                key={variant.id}
+                variant={variant}
+                verdict={verdicts.get(variant.id) ?? null}
+                humanCalls={humanCalls.filter((a) => a.variant_id === variant.id)}
+                picked={picked === variant.id}
+                selectable={status === "awaiting_approval"}
+                onPick={() => pick(variant)}
+              />
+            ))}
+          </div>
         </div>
       )}
 
+      {/* An interrupt, not another block: it is the only thing on the page with a
+          surface under it, because it is the only thing asking for something. */}
       {status === "awaiting_approval" && (
-        <div className="mt-6 rounded border border-amber-300 bg-amber-50 p-4">
-          <h2 className="font-semibold">Your call</h2>
-          <p className="mt-1 text-sm text-neutral-700">
+        <div className={`${SECTION} border border-warn/30 border-l-2 border-l-warn bg-surface p-6`}>
+          <SectionRule label="your call" agent="human" tone="text-warn" />
+          <p className="mt-5 max-w-prose font-sans text-body text-bone">
             {target ? (
               <>
-                Deciding on the <strong>{target.treatment}</strong> variant.
-                {targetBlocked && " The gate blocked it: approving is an override and needs a reason."}
+                Deciding on the <span className="label text-warn">{target.treatment}</span> variant.
+                {targetBlocked && " Guardian blocked it: approving is an override and needs a reason."}
               </>
             ) : (
-              "Pick a variant above."
+              "Pick a variant above to decide on it."
             )}
           </p>
 
-          <div className="mt-3 grid gap-3 md:grid-cols-2">
-            <label className="text-sm">
-              <span className="text-neutral-600">Who you are</span>
+          <div className="mt-5 grid gap-5 md:grid-cols-2">
+            <label className="block">
+              <span className="label text-muted">who you are</span>
               <input
                 value={reviewedBy}
                 onChange={(e) => setReviewedBy(e.target.value)}
                 placeholder="you@example.com"
-                className="mt-1 w-full rounded border border-neutral-300 bg-white px-2 py-1"
+                className={FIELD}
               />
             </label>
-            <label className="text-sm">
-              <span className="text-neutral-600">Reason</span>
+            <label className="block">
+              <span className="label text-muted">reason</span>
               <input
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
-                placeholder="required to edit, reject, or override the gate"
-                className="mt-1 w-full rounded border border-neutral-300 bg-white px-2 py-1"
+                placeholder="required to edit, reject, or override guardian"
+                className={FIELD}
               />
             </label>
           </div>
 
           {target && (
-            <div className="mt-3 grid gap-3 md:grid-cols-2">
-              <label className="text-sm">
-                <span className="text-neutral-600">Hooks, one per line</span>
+            <div className="mt-5 grid gap-5 md:grid-cols-2">
+              <label className="block">
+                <span className="label text-muted">hooks, one per line</span>
                 <textarea
                   value={hooksText}
                   onChange={(e) => setHooksText(e.target.value)}
-                  rows={3}
-                  className="mt-1 w-full rounded border border-neutral-300 bg-white px-2 py-1 font-mono text-xs"
+                  rows={4}
+                  className={FIELD}
                 />
               </label>
-              <label className="text-sm">
-                <span className="text-neutral-600">Body</span>
+              <label className="block">
+                <span className="label text-muted">body</span>
                 <textarea
                   value={bodyText}
                   onChange={(e) => setBodyText(e.target.value)}
-                  rows={3}
-                  className="mt-1 w-full rounded border border-neutral-300 bg-white px-2 py-1 font-mono text-xs"
+                  rows={4}
+                  className={FIELD}
                 />
               </label>
             </div>
           )}
 
-          <div className="mt-3 flex flex-wrap gap-2">
+          {/* Each button is coloured by the state it produces, not by rank. */}
+          <div className="mt-6 flex flex-wrap items-center gap-2 border-t border-line pt-5">
             <button
               type="button"
               disabled={busy || !target}
               onClick={() => submit("approve")}
-              className="rounded bg-emerald-700 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+              className={`${BUTTON} ${
+                targetBlocked
+                  ? "border-warn/60 text-warn hover:bg-warn/10"
+                  : "border-ok/50 text-ok hover:bg-ok/10"
+              }`}
             >
-              {targetBlocked ? "Override and approve" : "Approve"}
+              {targetBlocked ? "override and approve" : "approve"}
             </button>
             <button
               type="button"
               disabled={busy || !target}
               onClick={() => submit("edit")}
-              className="rounded bg-neutral-900 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+              className={`${BUTTON} border-line text-bone hover:bg-line`}
             >
-              Edit and approve
+              edit and approve
             </button>
             <button
               type="button"
               disabled={busy || !target}
               onClick={() => submit("reject")}
-              className="rounded bg-rose-700 px-3 py-1.5 text-sm text-white disabled:opacity-40"
+              className={`${BUTTON} border-alarm/50 text-alarm hover:bg-alarm/10`}
             >
-              Reject
+              reject
             </button>
-            <span className="self-center text-xs text-neutral-500">
-              An edit is re-checked by the gate before anything is scheduled.
+            <span className="ml-auto max-w-xs font-sans text-body text-muted">
+              An edit goes back through guardian before anything is scheduled.
             </span>
           </div>
         </div>
@@ -332,7 +371,7 @@ export function Live({
           this line before the person who lost had read it. */}
       {failure && (
         <p
-          className="mt-3 rounded border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900"
+          className="mt-6 border border-alarm/40 border-l-2 border-l-alarm bg-surface px-4 py-3 font-sans text-body text-alarm"
           role="alert"
         >
           {failure}
@@ -340,12 +379,16 @@ export function Live({
       )}
 
       {campaign.schedule.length > 0 && (
-        <div className="mt-6 rounded border border-emerald-300 bg-emerald-50 p-4 text-sm">
-          <h2 className="font-semibold">Scheduled</h2>
+        <div className={SECTION}>
+          <SectionRule label="scheduled" agent="distribution" tone="text-ok" />
           {campaign.schedule.map((s) => (
-            <p key={s.variant_id} className="mt-1">
-              {s.publish_at} ({s.timezone}) — {s.rationale}
-            </p>
+            <div key={s.variant_id} className="mt-6 border-l-2 border-l-ok bg-surface px-4 py-3">
+              <p className="text-data text-ok">
+                {s.publish_at.replace("T", " ").slice(0, 16)}{" "}
+                <span className="text-muted">{s.timezone}</span>
+              </p>
+              <p className="mt-1.5 max-w-prose font-sans text-body text-bone">{s.rationale}</p>
+            </div>
           ))}
         </div>
       )}
@@ -353,13 +396,25 @@ export function Live({
   );
 }
 
-const VERDICT_TONE: Record<Approval["verdict"], string> = {
-  approved: "bg-emerald-100 text-emerald-800",
-  needs_human: "bg-amber-200 text-amber-900",
-  rejected: "bg-rose-100 text-rose-800",
-};
+/** One row of a technical sheet: mono label left, value right. */
+function Field({
+  label,
+  sans,
+  children,
+}: {
+  label: string;
+  sans?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <>
+      <dt className="label pt-0.5 text-muted">{label}</dt>
+      <dd className={sans ? "font-sans text-body text-bone" : "text-data text-bone"}>{children}</dd>
+    </>
+  );
+}
 
-function VariantCard({
+function VariantColumn({
   variant,
   verdict,
   humanCalls,
@@ -375,61 +430,81 @@ function VariantCard({
   selectable: boolean;
   onPick: () => void;
 }) {
+  // A block is structural, not a hover state: the column carries a coral edge
+  // and the reasons are printed under it, where they can be read without a mouse.
+  const blocked = verdict !== null && isBlocked(verdict);
+
   return (
     <article
-      className={`rounded border p-3 text-sm ${picked ? "border-neutral-900 ring-1 ring-neutral-900" : "border-neutral-200"}`}
+      className={`flex flex-col gap-5 border-l-2 bg-bg p-5 ${
+        blocked ? "border-l-alarm" : picked ? "border-l-bone" : "border-l-transparent"
+      }`}
     >
-      <div className="flex items-center gap-2">
-        <span className="rounded bg-neutral-900 px-2 py-0.5 text-xs font-medium text-white">
-          {variant.treatment}
-        </span>
-        <span
-          className={`rounded px-2 py-0.5 text-xs font-medium ${verdict ? VERDICT_TONE[verdict.verdict] : "bg-neutral-200 text-neutral-600"}`}
-        >
-          gate: {verdict?.verdict ?? "not judged"}
-        </span>
+      {/* `creative:demo` is verbatim the name in the trace table's agent column,
+          so a column up here and a row down there are visibly the same call. */}
+      <div className="flex items-baseline gap-2">
+        <span className="label text-bone">creative:{variant.treatment}</span>
+        <span className="label ml-auto text-muted">{variant.platform}</span>
         {selectable && (
           <button
             type="button"
             onClick={onPick}
-            className="ml-auto rounded border border-neutral-300 px-2 py-0.5 text-xs hover:bg-neutral-100"
+            className={`label border px-2 py-0.5 ${
+              picked ? "border-bone text-bone" : "border-line text-muted hover:text-bone"
+            }`}
           >
             {picked ? "picked" : "pick"}
           </button>
         )}
       </div>
 
-      <ul className="mt-3 list-disc pl-4 text-neutral-900">
+      <ul className="space-y-2.5 font-sans text-body leading-snug text-bone">
         {variant.hooks.map((hook) => (
-          <li key={hook}>{hook}</li>
+          <li key={hook} className="border-l border-line pl-3">
+            {hook}
+          </li>
         ))}
       </ul>
-      <p className="mt-2 text-neutral-600">{variant.body}</p>
+
+      <p className="font-sans text-body text-muted">{variant.body}</p>
+
       {variant.hashtags.length > 0 && (
-        <p className="mt-2 text-xs text-neutral-500">{variant.hashtags.join(" ")}</p>
+        <p className="text-data text-muted">{variant.hashtags.join(" ")}</p>
       )}
 
-      {verdict && verdict.violations.length > 0 && (
-        <ul className="mt-3 space-y-1 rounded bg-rose-50 p-2 text-xs text-rose-800">
-          {verdict.violations.map((v) => (
-            <li key={v.rule_id}>{v.detail}</li>
-          ))}
-        </ul>
-      )}
+      <div className="mt-auto space-y-2.5 border-t border-line pt-4">
+        <div className="flex items-center gap-2">
+          <span className="label text-muted">guardian</span>
+          <Badge tone={verdict ? VERDICT_TONE[verdict.verdict] : "border-line text-muted"}>
+            {verdict?.verdict ?? "not judged"}
+          </Badge>
+        </div>
 
-      {humanCalls.map((call, i) => (
-        // An override is painted as one: a human approve over a gate block is
-        // not the same record as a plain approve, and it does not look like one.
-        <p
-          key={`${call.variant_id}-${i}`}
-          className={`mt-2 rounded p-2 text-xs ${call.overrode ? "bg-amber-200 text-amber-900" : "bg-neutral-100 text-neutral-700"}`}
-        >
-          <strong>
-            {call.overrode ? `override of ${call.overrode}` : call.verdict} by {call.reviewed_by}
-          </strong>
-          {call.reason ? ` — ${call.reason}` : null}
-        </p>
-      ))}
+        {verdict && verdict.violations.length > 0 && (
+          <ul className="space-y-1.5 text-data text-alarm">
+            {verdict.violations.map((v) => (
+              <li key={v.rule_id}>
+                <span className="text-muted">{v.rule_id}</span> {v.detail}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {humanCalls.map((call, i) => (
+          // An override is painted as one: a human approve over a gate block is
+          // not the same record as a plain approve, and it does not look like one.
+          <p
+            key={`${call.variant_id}-${i}`}
+            className={`text-data ${call.overrode ? "text-warn" : "text-muted"}`}
+          >
+            <span className="label">
+              {call.overrode ? `override of ${call.overrode}` : call.verdict}
+            </span>{" "}
+            by {call.reviewed_by}
+            {call.reason ? ` — ${call.reason}` : null}
+          </p>
+        ))}
+      </div>
     </article>
   );
 }

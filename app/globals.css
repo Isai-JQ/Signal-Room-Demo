@@ -1,1 +1,92 @@
 @import "tailwindcss";
+
+@theme {
+  /* ── Colour ────────────────────────────────────────────────────────────
+     The whole palette. Nothing downstream hardcodes a hex — a colour that
+     isn't in here isn't a colour this instrument reports in. */
+  --color-bg: #0e0e10;
+  --color-surface: #16161a;
+  --color-line: #26262b;
+  --color-bone: #e8e6e1;
+  --color-muted: #8a8a93; /* 5.6:1 on --color-bg — AA for body */
+  --color-ok: #4ade80; /* scheduled, distributed */
+  --color-warn: #fbbf24; /* needs_human, awaiting a person */
+  --color-alarm: #ff6b5a; /* failed, and every gate block */
+
+  /* ── Type ──────────────────────────────────────────────────────────────
+     Five steps, named for the job rather than the size, and deliberately
+     two-regime: 11 → 13 → 15 sit close together because the instrument
+     register is read as a block and size alone is not what separates them
+     (family and colour do that); 15 → 20 → 32 opens up because that is
+     where prose starts and one line has to carry the screen.
+
+     Nothing outside this scale is allowed on the page. */
+  --text-label: 0.6875rem; /* 11px — mono uppercase: badges, columns, field names */
+  --text-label--line-height: 1rem;
+  --text-label--letter-spacing: 0.14em;
+  --text-label--font-weight: 500;
+
+  --text-data: 0.8125rem; /* 13px — mono: trace cells, ids, timestamps, values */
+  --text-data--line-height: 1.25rem;
+  --text-data--letter-spacing: 0;
+
+  --text-body: 0.9375rem; /* 15px — sans: hooks, direction, summaries, banners */
+  --text-body--line-height: 1.5rem;
+
+  --text-lede: 1.25rem; /* 20px — sans: the brief headline */
+  --text-lede--line-height: 1.75rem;
+  --text-lede--letter-spacing: -0.01em;
+
+  --text-claim: 2rem; /* 32px — sans: the signal. One per screen. */
+  --text-claim--line-height: 2.5rem;
+  --text-claim--letter-spacing: -0.02em;
+
+  --font-mono: var(--font-mono-face), ui-monospace, monospace;
+  --font-sans: var(--font-sans-face), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Mono is the voice: everything is mono until prose asks for otherwise. */
+body {
+  background: var(--color-bg);
+  color: var(--color-bone);
+  font-family: var(--font-mono);
+  font-size: var(--text-data);
+  line-height: var(--text-data--line-height);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Two roles that repeat on every screen, named once instead of spelled out as
+   `font-mono text-label uppercase` at forty call sites. In the components layer,
+   so any utility at the call site still wins — colour in particular, which is
+   the half that reports something and always stays on the element. */
+@layer components {
+  .label {
+    font-family: var(--font-mono);
+    font-size: var(--text-label);
+    line-height: var(--text-label--line-height);
+    letter-spacing: var(--text-label--letter-spacing);
+    font-weight: var(--text-label--font-weight);
+    text-transform: uppercase;
+  }
+
+  /* A measured number: right-aligned and tabular. Deliberately says nothing
+     about tracking, so a `label` column header keeps its own. */
+  .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+input,
+textarea {
+  color-scheme: dark;
+}
+
+::selection {
+  background: var(--color-line);
+}
+
+*:focus-visible {
+  outline: 1px solid var(--color-bone);
+  outline-offset: 2px;
+}
