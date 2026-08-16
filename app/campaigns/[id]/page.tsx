@@ -13,7 +13,7 @@ import { after } from "next/server";
 import { Fragment } from "react";
 import { z } from "zod/v4";
 import { db } from "@/lib/db";
-import { load, start } from "@/lib/pipeline";
+import { claimRateLimited, start } from "@/lib/pipeline";
 import { agent_events, campaigns } from "@/lib/schema";
 import { CampaignState } from "@/lib/schemas";
 import { Live } from "./live";
@@ -28,13 +28,13 @@ export const dynamic = "force-dynamic";
  */
 async function resumeCampaign(campaign_id: string) {
   "use server";
-  // A Server Action is reachable by anyone who can POST to it, so the status is
-  // checked here and not only by the button that hides itself. Resuming a run
-  // that is not parked is either a double-click or a second pipeline over the
-  // same campaign — the exact token spend this whole change exists to avoid.
-  const state = await load(db, campaign_id);
-  if (state.status !== "rate_limited") return;
-  after(start(db, { campaign_id }).catch(() => {}));
+  // A Server Action is reachable by anyone who can POST to it, and this one was
+  // observed firing twice for a single click. `claimRateLimited` settles that in
+  // the database rather than here: only the caller that wins the row starts a
+  // pipeline, so a second call spends nothing.
+  if (await claimRateLimited(db, campaign_id)) {
+    after(start(db, { campaign_id }).catch(() => {}));
+  }
 }
 
 export default async function CampaignPage({ params }: { params: Promise<{ id: string }> }) {

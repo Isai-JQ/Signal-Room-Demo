@@ -136,7 +136,13 @@ export function Live({
     setBusy(false);
     // On success there is nothing to do: the decision's transitions arrive on
     // the stream like every other one.
-    if (!res.ok) setFailure(await res.text());
+    if (!res.ok) {
+      // The route answers `{ error }`. A 400 puts a Zod tree there rather than a
+      // sentence, which is worth saying plainly instead of rendering as JSON.
+      const body: unknown = await res.json().catch(() => null);
+      const message = (body as { error?: unknown } | null)?.error;
+      setFailure(typeof message === "string" ? message : "the decision was rejected — check the fields");
+    }
   }
 
   return (
@@ -317,13 +323,20 @@ export function Live({
               An edit is re-checked by the gate before anything is scheduled.
             </span>
           </div>
-
-          {failure && (
-            <p className="mt-3 font-mono text-xs text-rose-800" role="alert">
-              {failure}
-            </p>
-          )}
         </div>
+      )}
+
+      {/* Outside the panel above on purpose. The decision that loses the claim
+          is answered while the winner's transitions are already arriving, and
+          those move the campaign off `awaiting_approval` — which used to unmount
+          this line before the person who lost had read it. */}
+      {failure && (
+        <p
+          className="mt-3 rounded border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900"
+          role="alert"
+        >
+          {failure}
+        </p>
       )}
 
       {campaign.schedule.length > 0 && (

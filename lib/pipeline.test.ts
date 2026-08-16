@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { db as Db } from "./db";
-import { decide, PipelineError, shippableVariantIds, start, worstVerdict } from "./pipeline";
-import { brand_rules, campaigns } from "./schema";
+import {
+  claimRateLimited,
+  decide,
+  PipelineError,
+  resume,
+  shippableVariantIds,
+  start,
+  worstVerdict,
+} from "./pipeline";
+import { brand_rules, campaigns, comments } from "./schema";
 import { CampaignState, CampaignStatus, HumanDecision, type Approval } from "./schemas";
 
 const a = (
@@ -65,9 +73,29 @@ test("every verdict is also a campaign status, so nothing has to be translated",
 
 type Row = Record<string, unknown>;
 
+/**
+ * The literal values a drizzle WHERE compares against, dug out of its query
+ * chunks. Both conditional updates in the pipeline are compare-and-swaps, and a
+ * stub that ignored what they compare would pass whatever it was handed.
+ */
+function conditionValues(cond: unknown): unknown[] {
+  const found: unknown[] = [];
+  const walk = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    if ("value" in node && !("queryChunks" in node)) {
+      return void found.push((node as { value: unknown }).value);
+    }
+    for (const chunk of (node as { queryChunks?: unknown[] }).queryChunks ?? []) walk(chunk);
+  };
+  walk(cond);
+  return found.filter((v) => !Array.isArray(v)); // drop the SQL text chunks
+}
+
 /** Enough drizzle to run decide(): the campaigns row, the rules, and the writes. */
 function fakeDb(initial: CampaignState, rules: Row[]) {
   let current = initial;
+  // The row's version, as far as `awaiting()`'s CAS is concerned.
+  let updatedAt = new Date("2024-01-01T00:00:00.000Z");
   const commits: CampaignState[] = [];
   const events: Row[] = [];
 
@@ -83,12 +111,44 @@ function fakeDb(initial: CampaignState, rules: Row[]) {
   const db = {
     select: () => ({
       from: (table: unknown) =>
-        query(table === brand_rules ? rules : [{ id: current.campaign_id, state: current }]),
+        query(
+          table === brand_rules
+            ? rules
+            : table === comments
+              ? // The cluster behind the signal — Distribution re-reads it for
+                // the peak hour, so `resume()` reaches past the claim.
+                [{ posted_at: new Date("2024-01-01T09:00:00.000Z") }]
+              : [{ id: current.campaign_id, state: current, updated_at: updatedAt }],
+        ),
+    }),
+    // Both conditional updates are compare-and-swaps: `claimRateLimited` swaps on
+    // the status, `awaiting()` on `updated_at`. The stub grants the update only
+    // when what the WHERE compares still matches the row, which is the whole
+    // property under test — a stub that always granted it would pass forever.
+    update: () => ({
+      set: (v: Row) => ({
+        where: (cond: unknown) => ({
+          returning: async () => {
+            const stale = conditionValues(cond).some((want) =>
+              want instanceof Date
+                ? want.getTime() !== updatedAt.getTime()
+                : typeof want === "string" &&
+                  CampaignStatus.safeParse(want).success &&
+                  want !== current.status,
+            );
+            if (stale) return [];
+            if (v.status) current = { ...current, status: v.status as CampaignState["status"] };
+            if (v.updated_at instanceof Date) updatedAt = v.updated_at;
+            return [{ id: current.campaign_id }];
+          },
+        }),
+      }),
     }),
     insert: (table: unknown) => ({
       values: (v: Row) => {
         if (table === campaigns) {
           current = v.state as CampaignState;
+          if (v.updated_at instanceof Date) updatedAt = v.updated_at;
           commits.push(current);
         } else {
           events.push(v);
@@ -111,7 +171,9 @@ function stubGate(violations: { rule_id: string; detail: string }[]) {
   process.env.GROQ_API_KEY = "test-key";
   globalThis.fetch = (async () =>
     Response.json({
-      choices: [{ message: { content: JSON.stringify({ violations }) } }],
+      // `rationale` rides along so the same stub answers Distribution: both
+      // schemas are plain z.object, so each strips the key it wasn't asked for.
+      choices: [{ message: { content: JSON.stringify({ violations, rationale: "peak hour" }) } }],
     })) as unknown as typeof fetch;
   return () => {
     globalThis.fetch = real;
@@ -281,6 +343,98 @@ test("a resumed run picks up at the drafts and never re-pays for the brief", asy
     );
     assert.equal(state.brief?.headline, "put them on", "the brief that survived is the one reused");
     assert.equal(state.status, "awaiting_approval");
+  } finally {
+    restore();
+  }
+});
+
+test("two resumes race for one parked run, and only one of them spends anything", async () => {
+  const { db, commits } = fakeDb(rateLimitedState(), RULES);
+  const id = rateLimitedState().campaign_id;
+
+  // What a double-submitted Server Action does: both callers see `rate_limited`,
+  // because nothing moves until an agent commits and that is an LLM call away.
+  const [first, second] = await Promise.all([claimRateLimited(db, id), claimRateLimited(db, id)]);
+  assert.deepEqual([first, second].sort(), [false, true], "exactly one caller may start the run");
+  assert.equal(commits.length, 1, "and the losing claim writes nothing");
+
+  // The run this claim started is still going: a third click is not a resume.
+  assert.equal(await claimRateLimited(db, id), false);
+
+  // And a campaign that was never parked cannot be resumed into at all.
+  const parked = fakeDb(blockedState(), RULES);
+  assert.equal(await claimRateLimited(parked.db, blockedState().campaign_id), false);
+  assert.equal(parked.commits.length, 0);
+});
+
+test("two decisions race for one campaign, and the loser is told which way it went", async () => {
+  const { db, commits } = fakeDb(blockedState(), RULES);
+  const id = blockedState().campaign_id;
+  // `reject` on purpose: it reaches no model, so what this measures is the claim
+  // and not a stubbed completion.
+  const decision = {
+    action: "reject",
+    variant_id: "v1",
+    reviewed_by: "ana@example.com",
+    reason: "off-brand",
+  } as const;
+
+  const [first, second] = await Promise.allSettled([
+    decide(db, id, decision),
+    decide(db, id, decision),
+  ]);
+
+  const won = [first, second].filter((r) => r.status === "fulfilled");
+  const lost = [first, second].filter((r) => r.status === "rejected");
+  assert.equal(won.length, 1, "exactly one decision may be recorded");
+  assert.equal(commits.length, 1, "and the loser writes nothing");
+
+  // Distinguishable, not silent: a 409 that says another decision got there.
+  const err = (lost[0] as PromiseRejectedResult).reason as unknown;
+  assert.ok(err instanceof PipelineError);
+  assert.equal(err.status, 409);
+  assert.match(err.message, /another decision/);
+
+  // The claim is not a lock the caller has to release: once the winner has
+  // committed, the campaign is simply no longer awaiting_approval.
+  await assert.rejects(
+    decide(db, id, decision),
+    (e: unknown) => e instanceof PipelineError && e.status === 409 && /not awaiting_approval/.test(e.message),
+  );
+});
+
+test("resume races decide for the same claim, and whichever loses is told so", async () => {
+  // The other caller of `awaiting()`. `resume()` is the scripted yes and
+  // `decide()` the UI's, and they claim the same row through the same CAS —
+  // a campaign cannot both ship the gate's picks and record a human's.
+  const restore = stubGate([]);
+  try {
+    // Cleared by the gate, so `resume()` has something to ship if it wins — a
+    // campaign with nothing shippable would fail past the claim for its own
+    // reasons and say nothing about who got there first.
+    const cleared = { ...blockedState(), approvals: [a("approved", "v1")] };
+    const { db, commits } = fakeDb(cleared, RULES);
+    const id = cleared.campaign_id;
+
+    const [first, second] = await Promise.allSettled([
+      resume(db, id),
+      decide(db, id, {
+        action: "reject",
+        variant_id: "v1",
+        reviewed_by: "ana@example.com",
+        reason: "off-brand",
+      }),
+    ]);
+
+    const won = [first, second].filter((r) => r.status === "fulfilled");
+    const lost = [first, second].filter((r) => r.status === "rejected");
+    assert.equal(won.length, 1, "exactly one caller may claim the campaign");
+    assert.equal(commits.length, 1, "and the loser writes nothing");
+
+    const err = (lost[0] as PromiseRejectedResult).reason as unknown;
+    assert.ok(err instanceof PipelineError);
+    assert.equal(err.status, 409);
+    assert.match(err.message, /another decision/);
   } finally {
     restore();
   }

@@ -7,7 +7,7 @@
 // Every transition is persisted before it is announced, so a crash between the
 // two loses an event, never the state.
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { analyze } from "./agents/analyst";
 import { buildBrief } from "./agents/brief";
 import { draft, gate } from "./agents/creative";
@@ -136,6 +136,41 @@ export async function load(db: typeof Db, campaign_id: string): Promise<Campaign
 }
 
 /**
+ * Claims a parked run so exactly one caller may restart it, and reports whether
+ * this was the one that got it.
+ *
+ * Reading the status and then acting on it is not enough: nothing about the
+ * campaign changes until the first agent commits, which is seconds of LLM call
+ * later, so two clicks — or a re-submitted Server Action, which is what actually
+ * happened — both read `rate_limited` and both spend the tokens. The `UPDATE` is
+ * conditional on the status it just read, so the database picks the winner and
+ * the loser returns having spent nothing.
+ */
+export async function claimRateLimited(
+  db: typeof Db,
+  campaign_id: string,
+  { onTransition }: { onTransition?: OnTransition } = {},
+): Promise<boolean> {
+  const state = await load(db, campaign_id);
+  if (state.status !== "rate_limited") return false;
+
+  const claimed = await db
+    .update(campaigns)
+    // `updated_at` is what `awaiting()` compares against, so every write to this
+    // row has to move it. A claim that left it stale would let a later CAS pass
+    // against a row that had in fact changed.
+    .set({ status: "collecting", updated_at: new Date() })
+    .where(and(eq(campaigns.id, campaign_id), eq(campaigns.status, "rate_limited")))
+    .returning({ id: campaigns.id });
+  if (claimed.length === 0) return false;
+
+  // Rewrites the same row through the usual path, so the state and the frame
+  // that clears the banner both happen exactly where every other one does.
+  await commit(db, state, "collecting", onTransition);
+  return true;
+}
+
+/**
  * The row, before any agent runs. Separate from `start()` so an HTTP caller can
  * hand back the id and have the campaign already be there when the client
  * subscribes — a 202 pointing at a row that does not exist yet is a race.
@@ -234,10 +269,52 @@ export const shippableVariantIds = (approvals: Approval[]): Set<string> => {
   return new Set(decisive.filter((a) => a.verdict === "approved").map((a) => a.variant_id));
 };
 
+/**
+ * Claims the campaign for one decision, and returns the state it claimed.
+ *
+ * The status check alone is not a lock. `decide()` runs the re-gate and
+ * Distribution — LLM calls, seconds of them — between reading
+ * `awaiting_approval` and committing anything, so two approvals both read it and
+ * both spend. The `UPDATE` is a compare-and-swap on `updated_at`: conditional on
+ * the row not having moved since the read, so the database picks the winner and
+ * the loser is told rather than quietly running a second time.
+ *
+ * A compare-and-swap here and a status claim in `claimRateLimited` for the same
+ * reason. `rate_limited` has an honest status to claim into — `collecting` is
+ * where the run genuinely resumes, so a crash straight after the claim leaves
+ * the campaign somewhere it has actually been. A decision has no such state:
+ * there is nothing between `awaiting_approval` and what the human chose, so
+ * claiming by status would mean inventing one, and a crash mid-decision would
+ * park the campaign in a state nobody decided — which reads as an answer and is
+ * not one. Swapping on the version claims the row without moving it.
+ *
+ * ponytail: `updated_at` doubles as the version, which leaves two edges. A claim
+ * landing in the same millisecond as the commit before it would compare equal,
+ * and a caller whose read lands *after* another's claim gets a fresh value and
+ * passes — so this closes the lost-update race the UI actually hit, not every
+ * interleaving. A monotonic `version` integer bumped in `commit()` is the fix
+ * when that matters; `SELECT … FOR UPDATE` is not, because it would hold a
+ * transaction open across an LLM call.
+ */
 async function awaiting(db: typeof Db, campaign_id: string): Promise<CampaignState> {
-  const state = await load(db, campaign_id);
+  const [row] = await db.select().from(campaigns).where(eq(campaigns.id, campaign_id)).limit(1);
+  if (!row) throw new PipelineError(`no campaign ${campaign_id}`, 404);
+
+  const state = CampaignState.parse(row.state);
   if (state.status !== "awaiting_approval") {
     throw new PipelineError(`campaign ${campaign_id} is ${state.status}, not awaiting_approval`, 409);
+  }
+
+  const claimed = await db
+    .update(campaigns)
+    .set({ updated_at: new Date() })
+    .where(and(eq(campaigns.id, campaign_id), eq(campaigns.updated_at, row.updated_at)))
+    .returning({ id: campaigns.id });
+  if (claimed.length === 0) {
+    throw new PipelineError(
+      `another decision on campaign ${campaign_id} was recorded first — reload to see what it decided`,
+      409,
+    );
   }
   return state;
 }

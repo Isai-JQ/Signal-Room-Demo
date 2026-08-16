@@ -5,6 +5,7 @@
 // resume the run into Distribution, which is why this responds slowly — it waits
 // for the schedule. The stream carries the same transitions if you'd rather not.
 import { db } from "@/lib/db";
+import { humanError } from "@/lib/llm/provider";
 import { decide, PipelineError } from "@/lib/pipeline";
 import { HumanDecision } from "@/lib/schemas";
 
@@ -26,9 +27,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       schedule: state.schedule,
     });
   } catch (err) {
-    // 404 unknown campaign, 409 wrong state or wrong variant, 500 the agents
-    // failed — and that last one already left the campaign as needs_human.
+    // 404 unknown campaign, 409 wrong state, wrong variant, or another decision
+    // claimed this one first, 500 the agents failed — and that last one already
+    // left the campaign as failed or rate_limited.
     const status = err instanceof PipelineError ? err.status : 500;
-    return Response.json({ error: String(err) }, { status });
+    // `humanError` on the 500: an agent failure carries the provider's body, and
+    // that has the org id in it. The trace row keeps the whole thing.
+    return Response.json(
+      { error: err instanceof PipelineError ? err.message : humanError(err) },
+      { status },
+    );
   }
 }

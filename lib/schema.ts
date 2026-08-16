@@ -59,7 +59,15 @@ export const campaigns = pgTable(
     // are still measurement, not demo: the list hides them unless asked.
     is_eval: boolean("is_eval").notNull().default(false),
     created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updated_at: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    // `precision: 3` because this column is a version, not just a record: the
+    // compare-and-swap in `awaiting()` reads it into a JS Date and writes it back
+    // as the WHERE. Postgres defaults to microseconds and a Date holds
+    // milliseconds, so at full precision a value read from `defaultNow()` never
+    // compares equal to itself and every decision 409s forever. Matching the
+    // column to the Date's resolution makes the round-trip exact.
+    updated_at: timestamp("updated_at", { withTimezone: true, precision: 3 })
+      .defaultNow()
+      .notNull(),
   },
   (t) => [index("campaigns_status_idx").on(t.status)],
 );
